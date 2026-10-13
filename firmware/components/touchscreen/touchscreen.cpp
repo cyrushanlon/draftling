@@ -123,7 +123,14 @@ static void native_to_logical(int nx, int ny, int *ox, int *oy)
         t = sx_native; sx_native = sy_native; sy_native = t;
     }
 
-    /* Scale native -> logical. Guard against zero. */
+    /* Rendering is inset, not squeezed: remove the hidden bezel
+     * pixels before scaling into the visible canvas. */
+    rx -= s_cfg.crop_left;
+    ry -= s_cfg.crop_top;
+    sx_native -= s_cfg.crop_left + s_cfg.crop_right;
+    sy_native -= s_cfg.crop_top + s_cfg.crop_bottom;
+
+    /* Scale cropped native -> logical. Guard against zero. */
     if (sx_native <= 0) sx_native = 1;
     if (sy_native <= 0) sy_native = 1;
     int lx = (int)((int64_t)rx * s_cfg.logical_width  / sx_native);

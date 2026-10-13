@@ -106,8 +106,11 @@ extern "C" size_t git_sync_max_file_size(void)
 
 /* ---- best-effort wall-clock ------------------------------------- */
 
+static bool s_network_time_enabled=true;
+extern "C" void git_sync_set_network_time(bool enabled) { s_network_time_enabled=enabled; }
 static void ensure_time(void)
 {
+    if(!s_network_time_enabled) return;
     if (s_time_synced) return;
     /* Only ever attempt this once per boot -- set the flag up front,
      * regardless of whether the sync below actually succeeds, so an
@@ -1007,5 +1010,16 @@ extern "C" git_sync_file_status_t git_sync_file_status(const char *name)
 extern "C" git_sync_state_t git_sync_get_state(void) { return s_state; }
 extern "C" void git_sync_set_callback(git_sync_callback_t cb) { s_callback = cb; }
 extern "C" bool git_sync_is_configured(void) { return s_cfg.configured; }
+extern "C" void git_sync_describe_destination(char *out, size_t size)
+{
+    if(!size) return;
+    if(!s_cfg.configured) { snprintf(out,size,"No remote configured. Your writing stays local until you set up sync."); return; }
+    char url[sizeof(s_cfg.repo_url)]; snprintf(url,sizeof(url),"%s",s_cfg.repo_url);
+    char *suffix=strpbrk(url,"?#"); if(suffix) *suffix=0;
+    char *authority=strstr(url,"://"); authority=authority?authority+3:url;
+    char *slash=strchr(authority,'/'); char *at=strchr(authority,'@');
+    if(at && (!slash || at<slash)) memmove(authority,at+1,strlen(at+1)+1);
+    snprintf(out,size,"Destination: %s\nBranch: %s  Folder: %s",url,s_cfg.branch,s_cfg.remote_path[0]?s_cfg.remote_path:"(root)");
+}
 extern "C" const char *git_sync_get_last_error(void) { return s_last_error; }
 extern "C" const char *git_sync_get_last_sync_time(void) { return s_last_sync; }

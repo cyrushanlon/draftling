@@ -43,6 +43,10 @@ esp_err_t git_sync_start(git_sync_direction_t direction);
 git_sync_state_t git_sync_get_state(void);
 void git_sync_set_callback(git_sync_callback_t callback);
 bool git_sync_is_configured(void);
+/* Diary UI owns optional NTP and persists the result to the hardware clock. */
+void git_sync_set_network_time(bool enabled);
+/* Display-only destination, with URL credentials and query/fragment removed. */
+void git_sync_describe_destination(char *out, size_t size);
 const char *git_sync_get_last_error(void);
 const char *git_sync_get_last_sync_time(void);
 

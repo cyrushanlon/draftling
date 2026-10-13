@@ -113,6 +113,10 @@ static void inactivity_cb(void *arg)
 static void kb_wait_cb(void *arg)
 {
     (void)arg;
+#if defined(CONFIG_DRAFTLING_TOUCHSCREEN)
+    /* Touch readers use the regular inactivity timer, not keyboard presence. */
+    return;
+#endif
     int64_t last_pair = ble_keyboard_last_pairing_activity_us();
     if (last_pair > 0 && !ble_keyboard_is_connected()) {
         int64_t remaining = last_pair + KB_WAIT_AFTER_PAIRING_US

@@ -7,12 +7,16 @@ extern "C" {
 /*
  * User-adjustable panel margins: pixels of physical panel hidden
  * under an opaque bezel/enclosure cover on each edge (e.g. a
- * recessed cutout whose cover overlaps the glass). Zero on every
- * board by default; adjustable via the editor's F1 -> Settings menu
+ * recessed cutout whose cover overlaps the glass). The board's
+ * DRAFTLING_DISPLAY_BEZEL_MARGIN supplies the initial safe inset
+ * (6 on X4 Pro, 0 elsewhere); DISPLAY_BEZEL_MARGIN_LEFT overrides
+ * the left edge (8 on X4 Pro). Adjustable via F1 -> Settings
  * and persisted in NVS.
  *
- * display_margins_init() loads the persisted values (0 if none are
- * stored yet) into a FROZEN, session-lifetime copy. main.cpp calls it
+ * display_margins_init() loads persisted values into a FROZEN copy.
+ * On the first boot with a nonzero safe inset, smaller saved values
+ * are raised once. Later explicit adjustments are preserved.
+ * main.cpp calls it
  * once, very early in app_main() -- right after nvs_flash_init() and
  * before display_init() / draftling_lvgl_port_init() -- so every
  * consumer of the panel's logical width/height (the LVGL display
@@ -45,7 +49,8 @@ int  display_margin_bottom(void);
  * before a restart. */
 void display_margins_set(int left, int right, int top, int bottom);
 
-/* Read back the raw NVS-persisted margin values (which may differ
+/* Read back the NVS-persisted margins (board default for missing keys,
+ * values above 40 clamped), which may differ
  * from the frozen display_margin_*() values above if changed this
  * session -- they take effect on the next restart). Any output
  * pointer may be NULL. Used by the Settings UI to seed its own

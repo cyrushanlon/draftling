@@ -78,7 +78,7 @@ load the firmware quickly without having to compile it.
   windows. The split follows the display's long side -- left/right in
   landscape, top/bottom in portrait.
 
-- **Portrait or landscape**: F1 -> Settings -> "Display orientation"
+- **Portrait or landscape**: Home -> Settings -> Advanced -> Display & editing settings -> "Display orientation"
   turns the whole UI 90 degrees. Takes effect after a restart.
 
 - **Synchronizing your files with a Git repository** using a real,
@@ -91,7 +91,7 @@ load the firmware quickly without having to compile it.
   writes the result back to the SD card and pushes to the server. The
   WiFi client and Git credentials are configured in `wifi.cfg` and
   `git.cfg` on the SD card -- or, for WiFi, picked from an on-device
-  scan (F1 -> WiFi: New connection), which writes `wifi.cfg` for you. Public
+  scan (Settings -> Advanced -> WiFi: New connection), which writes `wifi.cfg` for you. Public
   and private repositories on GitHub and other standard Git HTTP hosts
   are supported. See [docs/git-sync.md](docs/git-sync.md).
 
@@ -115,7 +115,7 @@ load the firmware quickly without having to compile it.
   Classic, LilyGO T5 E-Paper S3 Pro / Pro Lite / H752, M5Stack
   PaperS3 and PaperMono, Waveshare ESP32-S3-ePaper-3.97, ESP32-S3-RLCD-4.2,
   ESP32-S3-Touch-LCD-7, ESP32-S3-Touch-LCD-3.49 and ESP32-S3-LCD-3.16, all four
-  Freenove FNK0104 boards, and the Viewe UEDX24320028E-WB-A), F1 -> "SD card via USB" opens a picker
+  Freenove FNK0104 boards, and the Viewe UEDX24320028E-WB-A), Settings -> Advanced -> "SD card via USB" opens a picker
   for Off / Read-only / Read-write; the choice applies as soon as you
   leave that picker (Enter to confirm, or Esc to back out unchanged),
   exposing the SD card to a connected computer as a normal USB
@@ -134,18 +134,18 @@ load the firmware quickly without having to compile it.
 
 | Shortcut | Action |
 |----------|--------|
-| F1 | Open main menu (BLE, WiFi, Git, Layout, Settings...). Inside the menu, the letter drawn bold picks its item: S Settings, B BLE scan, W WiFi connect, N new WiFi connection, D WiFi disconnect, G Git sync, K keyboard layout, U SD card via USB, F Format SD card, H Help |
+| F1 | Open Home: Continue writing, New document, My documents, Settings. Technical controls are under Settings -> Advanced; bold letters there select their items. |
 | F10 | Help: the shortcuts of the current screen and, in the editor, the formatting syntax of the document (Markdown or Fountain). Up/Down, PgUp/PgDn (or Ctrl+Up/Down), Home/End scroll; Esc or Enter closes it |
 | Arrow keys | Move cursor |
 | Home / End | Start / end of line |
 | PgUp / PgDn | Scroll by page |
 | Ctrl+Up/Down | Scroll by page (same as PgUp/PgDn) |
 | Ctrl+S | Save file |
-| Ctrl+O | Open file browser |
-| Ctrl+N | New file (asks for the format: Markdown, Fountain or plain text) |
+| Ctrl+O | Return to Home; choose My documents to open a file |
+| Ctrl+N | New Markdown document |
 | Ctrl+L | Cycle keyboard layout |
 | Win+Space | Cycle keyboard layout (same as Ctrl+L) |
-| Ctrl+M | Menu (same as F1) |
+| Ctrl+M | Home (same as F1) |
 | Ctrl+P | Enter deep sleep. With unsaved changes, a dialog offers Save and sleep / Sleep without saving / Cancel |
 | Ctrl+G | Git sync (commit, fetch, rebase/merge, push) |
 | Ctrl+W | Toggle WiFi (connect / disconnect) |
@@ -162,7 +162,7 @@ load the firmware quickly without having to compile it.
 | Ctrl+2 | Split into two equal panes (left/right in landscape, top/bottom in portrait) |
 | Ctrl+3 | Split with the first pane at 2/3; press again to toggle the first pane to 1/3 |
 | Ctrl+Tab | Move keyboard focus to the other pane (when split) |
-| Escape | Switch to file browser. With unsaved changes, a dialog offers Save and exit / Exit without saving / Cancel (Up/Down + Enter to choose) |
+| Escape | Return to Home. With unsaved changes, a dialog offers Save and exit / Exit without saving / Cancel (Up/Down + Enter to choose) |
 
 `Ctrl+P` and `Ctrl+1` / `Ctrl+2` / `Ctrl+3` also work in the file
 browser (the split layout applies the next time you open a file).
@@ -172,10 +172,10 @@ In the file browser:
 | Shortcut | Action |
 |----------|--------|
 | Up / Down, Enter | Select and open a file |
-| N or Ctrl+N | New file: pick Markdown (`.md`), Fountain screenplay (`.fountain`) or plain text (`.txt`) with Up/Down + Enter, or press M / F / T |
+| N or Ctrl+N | New Markdown document (`.md`) |
 | F2 or Alt+R | Rename the selected file. The name must end in `.md`, `.fountain` or `.txt`; the saved cursor position (the `.meta` file) moves with it, and changing the extension changes the format |
 | Del or Alt+D | Delete the selected file, after a confirmation. Only allowed when the file is safely on the Git server: its current content must already be committed and pushed (see [Git sync](docs/git-sync.md)), so a deleted file can always be recovered from the repository history. The next sync commits the deletion |
-| F1 / Ctrl+M | Menu |
+| F1 / Ctrl+M | Home |
 | F10 | Help (file browser shortcuts) |
 
 
@@ -227,8 +227,8 @@ holding the cursor. Two editing helpers are available:
 ## Sleep
 
 The device enters deep sleep automatically after the inactivity timeout
-(F1 -> Settings -> "Standby timeout"), and you can put it to sleep on
-demand with **Ctrl+P** or the **F1 -> "Sleep now"** menu entry. Wake
+(Home -> Settings -> "Sleep after"), and you can put it to sleep on
+demand with **Ctrl+P** or **Home -> Settings -> Advanced -> "Sleep now"**. Wake
 with the boot / power button, or a touchscreen tap on boards that
 support it.
 
@@ -269,11 +269,11 @@ screen into two equal panes; **Ctrl+3** makes the first pane bigger
 single pane.
 
 The split always divides the display's **long side**: in landscape you
-get left / right panes, in portrait (F1 -> Settings -> "Display
-orientation") you get top / bottom panes. "First pane" is the left one
+get left / right panes, in portrait (Settings -> Advanced -> Display & editing
+settings -> "Display orientation") you get top / bottom panes. "First pane" is the left one
 in landscape, the top one in portrait.
 
-Each pane opens a file for itself: while split, **Ctrl+O** opens the
+Each pane opens a file for itself: while split, **Home -> My documents** opens the
 file browser for the focused pane, so the picked file loads into that
 pane while the other pane keeps its document. **Ctrl+Tab** moves
 keyboard focus between the two panes; the focused pane shows the active
@@ -287,6 +287,52 @@ reboot and deep sleep.
 
 
 ## Touch Operations
+
+The diary build adds **Today's entry**, a touch **Calendar**, and **Sync &
+backup** to Home. Each date uses `YYYY-MM-DD.md` on the SD card; the calendar
+marks saved entries and previews a day before creating or opening its entry.
+Home displays a random original quote from a collection of 100. Tap the date
+to set the hardware clock and local UTC offset (UTC initially).
+
+A persistent touch bar provides Home, Back, a contextual action, and Tools.
+It also provides Confirm/Cancel for text-entry dialogs. Tools exposes editing,
+file management, split views, sync, help and sleep. Keyboard input is needed
+for writing text, not for navigating the application. Named documents autosave
+after a pause; failed saves keep the writing open. See
+[the usability review](docs/diary-usability.md) for behavior and validation limits.
+
+The local build opens **Home** without a keyboard: Continue
+(with the recent document name), Today's entry, Calendar, My documents,
+Sync & backup, and Settings. New standalone notes are under Tools.
+F1 or Ctrl+M returns to Home. Unsaved work is kept while navigating.
+New documents use Markdown automatically; Save is on the touch bar (Ctrl+S also works).
+Home and everyday Settings use touch-only icon grids: tap a tile once to activate.
+Tiles have no selection highlight. A brief outlined press effect confirms the
+tap before opening the destination or changing a setting; keyboard selection
+is disabled on these two grids.
+Other lists and nested pickers also activate with a single tap.
+
+Settings contains text size, light, sleep timeout, and Keyboard.
+Settings -> Advanced contains WiFi/Git sync, USB file access, and
+Erase SD card. Advanced -> Display & editing settings contains layouts,
+orientation, bezel margins, and factory reset. Restart-only changes
+still show the apply/restart prompt. No font or pairing-screen redesign
+is included in this change.
+
+Reading, calendar and settings work without a keyboard. Write requests pairing;
+Home leaves the waiting page while pairing continues in the background.
+BLE automatically connects/reconnects and navigation keeps it connected.
+Reading has touch scrolling and older/newer entry controls.
+Calendar also offers a newest-first journal list with excerpts. Tools is grouped
+into Writing, Documents and Device, with optional prompts and Privacy & recovery.
+Local versions, Trash and document exports are on the SD card (not encrypted);
+restoring always creates a separate note. See the review for storage costs.
+The initial margins are 8 pixels on the left and 6 on
+the other edges
+to keep content out from under the case bezel. Older smaller margins
+are raised once, without reducing any larger saved margins. Each edge
+remains adjustable under Settings -> Advanced -> Display & editing settings;
+restart to apply changes.
 
 On boards with a touchscreen, touch input works alongside the
 Bluetooth keyboard -- you can use either, or both. All gestures are
@@ -332,7 +378,7 @@ boot or power button, or on touchscreen tap where hardware allows it.
 ## Keyboard Layouts
 
 The editor supports five keyboard layouts that can be switched with
-**Ctrl+L** (or **Win+Space**) or through the **F1 menu**:
+**Ctrl+L** (or **Win+Space**) or through **Settings -> Advanced**:
 
 | Code | Layout |
 |------|--------|
@@ -349,7 +395,7 @@ need to be enabled in firmware configuration.
 
 ## Formatting the SD card
 
-F1 -> "Format SD card..." erases everything on the card (documents,
+Home -> Settings -> Advanced -> "Erase SD card..." erases everything on the card (documents,
 `wifi.cfg`, `git.cfg` and the local Git history) and creates a fresh
 FAT file system on it. If a WiFi network is configured, you are first
 asked whether to keep its settings: if you keep them, a new
@@ -372,11 +418,11 @@ MySSID
 MyPassword
 ```
 
-You do not have to edit this file by hand: F1 -> "WiFi: New
+You do not have to edit this file by hand: Settings -> Advanced -> "WiFi: New
 connection..." scans for visible networks, lets you pick one and (if
 it is not open) type its password, then writes `wifi.cfg` for you on a
 successful connection. Editing the file directly still works too --
-F1 -> "WiFi: Connect to <SSID>" and `Ctrl+W` (quick reconnect, no
+Settings -> Advanced -> "WiFi: Connect to <SSID>" and `Ctrl+W` (quick reconnect, no
 scan) read it fresh on every call, so a hand-edited file always takes
 effect on the next connect.
 
@@ -412,7 +458,7 @@ author_email=jane@example.com
 With a [Draftbox](https://github.com/clackups/draftbox) server (such as
 `draftbox.art`) you do not have to write `git.cfg` yourself. On the
 Draftbox website, create an access token for your repository with a
-one-time password. Then choose F1 -> "Connect a Draftbox
+one-time password. Then choose Settings -> Advanced -> "Connect a Draftbox
 repository..." (if WiFi is not connected yet, the device first
 connects to the network from `wifi.cfg`, as `Ctrl+W` does): confirm or change the site name,
 press Enter, type the 8-digit password and press Enter again. The

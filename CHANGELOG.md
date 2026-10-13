@@ -6,6 +6,102 @@ in the git log.
 
 ## [Unreleased]
 
+### Fixed
+
+- **Consistent touch-screen header**: Home's date/time, battery and connected
+  WiFi status now stay visible on every app page, including the editor and
+  pairing. Page content reserves space below the shared bar. The editor's
+  default shortcut legend is removed; editing keys and touch actions remain.
+
+- **Background keyboard connection while browsing**: BLE automatically scans
+  and reconnects at boot. Returning Home leaves pairing and existing connections
+  running; pairing-code notices can be hidden without blocking touch navigation.
+
+- **Crash when touching Home or Settings tiles**: removed an invalid null
+  LVGL transition descriptor. Tiles now own their styles without inherited
+  list-button transitions; the outlined press feedback remains.
+
+### Added
+
+- **Diary organisation and revisiting**: bookmarks and eight topics for dated
+  entries, explicit On this day and random Revisit actions, and touch-confirmed
+  moment moves with before/after recovery journals and retry protection.
+- **Backup and storage clarity**: separate local-save/last-known-remote status,
+  touch conflict review (keep both/first/second), SD capacity and low-space
+  warnings, and optional manual cleanup retaining 20 or 50 versions per file.
+  Keep all remains the default; current files, Trash and exports are not pruned.
+- **Personal diary preferences**: quote favourites/hiding/off, custom reflection
+  prompts, reading size and spacing, nine timezone choices including regional
+  DST rules, and opt-in network time using an already connected WiFi network.
+
+- **Moments and touch-only check-ins**: each diary day now has a shared,
+  paginated timeline. Add a moment appends a timestamped Markdown section
+  when typing begins; leaving it empty creates no file or heading. Older
+  days omit the automatic time. Optional mood and energy check-ins save
+  without a keyboard, and can be continued in the editor later. Save retries
+  preserve the draft without appending a duplicate check-in.
+
+- **Keyboard-free diary browsing**: start on Home, read with touch scrolling
+  and adjustable reading size, and browse dated excerpts in a newest-first
+  journal. A keyboard is requested only when entering writing mode.
+- **Gentle prompts and grouped Tools**: optional reflection prompts can be
+  added to a note or selected day; Writing, Documents and Device groups keep
+  technical controls out of the daily workflow.
+- **Local recovery and export**: previous saved content is copied before
+  changed saves, deleted notes go to Trash, and recovery restores a separate
+  note without overwriting current writing. Export copies documents only.
+  Privacy & recovery explains unencrypted SD storage; Sync shows its destination.
+
+- **Personal diary and calendar**: a touch month grid opens daily Markdown
+  entries with automatic date-based names, previews and saved-entry markers.
+  Home includes Today's entry, calendar, sync, and one of 100 original quotes.
+- **Touch navigation throughout**: a persistent contextual navigation bar,
+  touch tools and larger confirmation choices make menus and dialogs usable
+  without keyboard navigation. Typing still uses the paired keyboard.
+- **Date/time controls and local autosave**: the hardware RTC supplies UTC;
+  touch controls set the clock and local UTC offset. Named documents save
+  after a typing pause, and sync clearly distinguishes local saves from backup.
+
+- **A simple home screen after connecting a keyboard**: choose Continue
+  writing, New document, My documents, or Settings. Continue remembers
+  your last document across restarts. F1 or Ctrl+M opens Home while
+  working, without discarding your document. New document refuses to
+  replace unsaved work; My documents keeps the existing save/exit prompt.
+- **Everyday settings separated from Advanced**: text size, light,
+  sleep and keyboard controls are together. Advanced contains Git/WiFi,
+  USB file access, layouts, display adjustments, and reset options.
+  Card formatting is clearly labeled "Erase SD card" and keeps both
+  existing confirmations. Pairing, fonts and display waveforms are unchanged.
+
+### Changed
+
+- **Touch-only Home and Settings grids**: removed keyboard selection and
+  persistent tile highlights. Taps show a brief outlined press effect before
+  activation, following the original shell's rounded monochrome tiles.
+  Feedback uses the existing vendor refresh path, not the rejected fast LUTs.
+
+- **Quicker document creation**: new documents start in Markdown without
+  a format prompt. Home no longer displays the bottom instruction line.
+
+- **Touch app grids**: Home and everyday Settings have large labeled
+  monochrome icons with single-tap activation. Arrow keys navigate the
+  grid and Enter activates a tile; technical settings keep their lists.
+
+- **Document exits return to Home**: Escape and Ctrl+O keep the existing
+  unsaved-changes prompt and return to Home. Open files through My documents.
+
+- **Keyboard connection is required again**: removed the local
+  "Skip for now" button and restored the normal keyboard-wait behavior.
+
+### Fixed
+
+- **Content no longer starts under the X4 Pro case bezel**: start with
+  an 8-pixel left margin and 6 pixels on the other sides, including the
+  keyboard pairing screen. Upgrading the prior bezel build changes only
+  the left edge. Existing smaller margins are raised once; larger ones are
+  preserved. Touch targets use the same crop, so taps stay aligned.
+  Fine-tune each edge in Settings (restart to apply).
+
 ## [1.0.15] - 2026-10-08
 
 ### Fixed

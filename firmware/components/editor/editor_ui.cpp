@@ -3,6 +3,20 @@
 #include <string>
 #include <vector>
 #include <algorithm>
+#include <ctime>
+#include <cerrno>
+#include <cstdlib>
+#include <sys/stat.h>
+#include <sys/time.h>
+#include <dirent.h>
+#include "diary_store.h"
+#include <esp_random.h>
+#include "diary_model.h"
+#include "diary_moments.h"
+#include "diary_features.h"
+#include "diary_retention.h"
+#include "diary_move.h"
+#include <esp_netif_sntp.h>
 #include <esp_log.h>
 #include <esp_system.h>
 #include <esp_app_desc.h>
@@ -112,9 +126,17 @@ static inline bool scr_axes_swapped(void) { return display_orientation_is_portra
 #define SCR_W        (scr_axes_swapped() \
     ? (CONFIG_DRAFTLING_DISPLAY_HEIGHT - display_margin_top()  - display_margin_bottom()) \
     : (CONFIG_DRAFTLING_DISPLAY_WIDTH  - display_margin_left() - display_margin_right()))
-#define SCR_H        (scr_axes_swapped() \
+#define PANEL_H      (scr_axes_swapped() \
     ? (CONFIG_DRAFTLING_DISPLAY_WIDTH  - display_margin_left() - display_margin_right()) \
     : (CONFIG_DRAFTLING_DISPLAY_HEIGHT - display_margin_top()  - display_margin_bottom()))
+#if defined(CONFIG_DRAFTLING_TOUCHSCREEN)
+#define NAV_H 48
+#define DIARY_HEADER_H 32
+#else
+#define NAV_H 0
+#define DIARY_HEADER_H 0
+#endif
+#define SCR_H (PANEL_H - NAV_H - DIARY_HEADER_H)
 /* Header / status bar heights. These bars always use FONT_11, so on
  * high-density boards (which render 1:1 with the taller Hack font
  * instead of the old 2x upscale) they must be twice as tall to fit the
@@ -810,6 +832,63 @@ static lv_timer_t *s_status_clear_timer = NULL;
 /* BLE connection prompt screen */
 static lv_obj_t *s_scr_ble_prompt  = NULL;
 static lv_obj_t *s_ble_prompt_lbl  = NULL;
+static lv_obj_t *s_scr_home = NULL;
+static lv_obj_t *s_home_list = NULL;
+static bool s_home_open = false;
+static bool s_home_was_open = false;
+static bool s_keyboard_connected_once = false;
+static int s_home_sel = 0, s_home_sel_prev = -1;
+static char s_last_document[256] = "";
+static void show_home(void);
+static void show_advanced_menu(void);
+static void show_settings(bool advanced = false);
+static void home_activate_item(int idx);
+static void show_msg_popup(const char *title, const char *text, bool busy);
+static void show_exit_prompt(bool to_browser = false);
+static void diary_calendar_show(void);
+static void diary_today_open(void);
+static void diary_sync(void);
+static void diary_clock_show(void);
+static void diary_nav_refresh(void);
+static void diary_date_touch(lv_event_t *);
+static bool diary_modal(void);
+static bool diary_require_keyboard(void);
+static bool s_diary_waiting_write=false;
+static void diary_read_path(const char *path);
+static void diary_journal_show(void);
+static void diary_prompts_show(void);
+static bool s_prompt_for_day=false;
+static void diary_privacy_show(void);
+static void diary_library_show(int kind);
+static void diary_timeline_show(void);
+static void diary_moment_begin(void);
+static void diary_checkin_begin(void);
+static void diary_hub_show(void);
+static void diary_personal_show(void);
+static void diary_zone_show(void);
+static void diary_labels_show(void);
+static void diary_move_show(void);
+static void diary_conflicts_show(void);
+static void diary_status_show(void);
+static void diary_preferences_load(void);
+static void diary_preferences_save(void);
+static void diary_network_time(bool manual);
+static const lv_font_t *diary_read_font(void);
+static void diary_prompts_load(void);
+static int diary_prompt_count(void);
+static const char *diary_prompt_text(void);
+static int s_diary_zone=0,s_read_spacing=8,s_read_font_size=1;
+static bool s_network_clock=false;
+static lv_obj_t *s_diary_screen = NULL;
+static lv_obj_t *s_diary_nav = NULL;
+static lv_obj_t *s_home_quote = NULL;
+static lv_obj_t *s_home_date = NULL;
+static lv_obj_t *s_diary_header = NULL;
+static bool (*s_clock_writer)(time_t) = NULL;
+static uint32_t s_diary_last_input = 0;
+static lv_timer_t *s_diary_timer = NULL;
+static char s_diary_notice[160] = "Saved locally; sync makes a remote copy.";
+extern "C" void editor_ui_set_clock_writer(bool (*writer)(time_t)) { s_clock_writer=writer; }
 
 /* Menu overlay objects */
 static lv_obj_t *s_scr_menu     = NULL;
@@ -855,7 +934,7 @@ static bool      s_menu_open    = false;
 
 /* Header line of the F1 menu screen (s_lbl_menu_hdr); the "Format SD
  * card" picker replaces it with its question while it is open. */
-#define MENU_HDR_TEXT "Menu - Up/Down, Enter to select, Esc to close"
+#define MENU_HDR_TEXT "Advanced"
 
 /* "Format SD card" picker: three steps rendered into s_menu_list (like
  * the "SD card via USB" picker), with the question in the menu header.
@@ -930,6 +1009,7 @@ static sd_card_file_entry_t s_browser_entries[64];
 /* Settings screen objects */
 static lv_obj_t *s_scr_settings  = NULL;
 static lv_obj_t *s_settings_list = NULL;
+static lv_obj_t *s_settings_hdr = NULL;
 static int       s_settings_sel  = 0;
 /* See s_menu_sel_prev above. */
 static int       s_settings_sel_prev = -1;
@@ -1068,15 +1148,16 @@ static int       s_search_match_end   = -1;
 
 /* ---- Exit / sleep prompt overlay ----
  * Shown when the editor has unsaved changes and the user asks to leave
- * it: Esc (-> file browser) or Ctrl+P / F1 "Sleep now" (-> deep sleep).
+ * it: Esc (-> Home) or Ctrl+P / F1 "Sleep now" (-> deep sleep).
  * Offers three choices: save, proceed without saving, or cancel and
  * keep editing. Navigated with Up/Down + Enter; Esc cancels.
  *
- * The same LVGL objects serve both destinations; s_exit_purpose picks
+ * The same LVGL objects serve all destinations; s_exit_purpose picks
  * which one the Save / Discard rows lead to, and the row labels are set
  * to match when the overlay is shown. */
 typedef enum {
-    EXIT_PURPOSE_BROWSER,   /* Esc: leave the editor for the file browser */
+    EXIT_PURPOSE_HOME,      /* Esc: leave the editor for Home */
+    EXIT_PURPOSE_BROWSER,   /* Home -> My documents */
     EXIT_PURPOSE_SLEEP,     /* Ctrl+P / "Sleep now": enter deep sleep */
 } exit_purpose_t;
 
@@ -1085,7 +1166,7 @@ static lv_obj_t *s_exit_hdr_lbl  = NULL;
 static lv_obj_t *s_exit_opt_lbl[3] = { NULL, NULL, NULL };
 static bool      s_exit_open     = false;
 static int       s_exit_sel      = 0;      /* 0=Save 1=proceed-no-save 2=Cancel */
-static exit_purpose_t s_exit_purpose = EXIT_PURPOSE_BROWSER;
+static exit_purpose_t s_exit_purpose = EXIT_PURPOSE_HOME;
 
 #define EXIT_OPT_SAVE   0
 #define EXIT_OPT_DISCARD 1
@@ -1104,39 +1185,19 @@ static const char *const SLEEP_OPT_LABELS[EXIT_OPT_COUNT] = {
     "Cancel (keep editing)",
 };
 
-/* ---- New-document format picker ----
- * Ctrl+N (and N in the file browser) asks which format the new
- * untitled document is written in. The overlay is moved onto the
- * active screen when shown: the editor screen for Ctrl+N in the editor
- * and the split-mode in-pane selector, the browser screen otherwise. */
+/* New documents always start in Markdown. */
 typedef enum {
     NEWDOC_BROWSER,   /* full-screen file browser: replace the document */
     NEWDOC_INPANE,    /* split-mode in-pane selector: the focused pane */
     NEWDOC_EDITOR,    /* Ctrl+N in the editor: the focused pane */
 } newdoc_target_t;
 
-#define NEWFMT_COUNT 3
-static lv_obj_t *s_newfmt_panel = NULL;
-static lv_obj_t *s_newfmt_opt_lbl[NEWFMT_COUNT] = { NULL, NULL, NULL };
-static bool      s_newfmt_open  = false;
-static int       s_newfmt_sel   = 0;
-static newdoc_target_t s_newfmt_target = NEWDOC_BROWSER;
-
-static const editor_doc_format_t NEWFMT_FORMATS[NEWFMT_COUNT] = {
-    EDITOR_DOC_MARKDOWN, EDITOR_DOC_FOUNTAIN, EDITOR_DOC_TEXT,
-};
-static const char *const NEWFMT_LABELS[NEWFMT_COUNT] = {
-    "Markdown (.md)",
-    "Fountain screenplay (.fountain)",
-    "Plain text (.txt)",
-};
 
 /* ---- Delete-file confirmation ----
  * Del or Alt+D in the file browser. Only offered for a file whose
  * current content is already on the Git server (git_sync_file_status()),
  * so a deletion can always be undone from the repository history. The
- * overlay is moved onto the active screen when shown, like the format
- * picker above. */
+ * overlay is moved onto the active screen when shown. */
 #define DELCONF_DELETE 0
 #define DELCONF_CANCEL 1
 #define DELCONF_COUNT  2
@@ -1157,6 +1218,7 @@ static char      s_del_next_name[256] = "";
  * Enter return to where the help was opened from. */
 typedef enum {
     HELP_FROM_EDITOR,
+    HELP_FROM_ADVANCED,
     HELP_FROM_BROWSER,   /* full-screen file browser */
     HELP_FROM_INPANE,    /* split-mode in-pane file selector */
 } help_origin_t;
@@ -1943,6 +2005,12 @@ static inline void battery_labels_repaint(void) {}
  * it is (re)picked here rather than only once at creation. */
 static void update_wifi_icons(void)
 {
+#if defined(CONFIG_DRAFTLING_TOUCHSCREEN)
+    /* Connectivity is shown once, in the shared header. */
+    if(s_img_wifi) lv_obj_add_flag(s_img_wifi,LV_OBJ_FLAG_HIDDEN);
+    if(s_img_br_wifi) lv_obj_add_flag(s_img_br_wifi,LV_OBJ_FLAG_HIDDEN);
+    return;
+#endif
     bool connected = wifi_manager_is_connected();
     bool dual_stack = connected && wifi_manager_has_global_ipv6();
     int icon_h = dual_stack ? WIFI6_ICON_H : WIFI_ICON_H;
@@ -1971,6 +2039,15 @@ static void update_wifi_icons(void)
 static void update_title_bar(void)
 {
     const char *path = editor_get_file_path();
+    if (path && strlen(path) < sizeof(s_last_document) && strcmp(path, s_last_document) != 0) {
+        snprintf(s_last_document, sizeof(s_last_document), "%s", path);
+        nvs_handle_t h;
+        if (nvs_open(NVS_NS_EDITOR, NVS_READWRITE, &h) == ESP_OK) {
+            nvs_set_str(h, "last_document", s_last_document);
+            nvs_commit(h);
+            nvs_close(h);
+        }
+    }
     const char *name;
     switch (editor_get_format()) {
     case EDITOR_DOC_FOUNTAIN: name = "Untitled screenplay"; break;
@@ -3628,7 +3705,7 @@ static void editor_touch_event_cb(lv_event_t *e)
         /* Translate screen-space point into pane-local coordinates.
          * The pane's content area starts at (s_rp->x, s_rp->y). */
         int lx = pt.x - s_rp->x;
-        int ly = pt.y - s_rp->y;
+        int ly = pt.y - s_rp->y - DIARY_HEADER_H;
         if (ly < 0) return;
 
         uint32_t now = lv_tick_get();
@@ -3695,6 +3772,7 @@ typedef struct {
     lv_obj_t       *list;        /* list widget */
     list_activate_fn activate;   /* fn to call when an already-selected row is tapped */
     int             count;       /* number of items (for clamp) */
+    bool            single_tap;  /* app tiles activate on the first tap */
 } list_touch_ctx_t;
 
 /* One static context per touchable list. The refresh_*() functions
@@ -3704,6 +3782,68 @@ typedef struct {
 static list_touch_ctx_t s_menu_touch_ctx;
 static list_touch_ctx_t s_settings_touch_ctx;
 static list_touch_ctx_t s_browser_touch_ctx;
+static list_touch_ctx_t s_home_touch_ctx;
+
+/* E-paper feedback uses one pressed frame, then the destination screen.
+ * Keep it visible for a vendor fast-refresh interval; never animate at
+ * LCD frame rates or change the panel waveform. */
+static lv_timer_t *s_tile_timer = NULL;
+static lv_obj_t *s_pressed_tile = NULL;
+static list_touch_ctx_t *s_tile_context = NULL;
+static int s_tile_index = -1;
+
+static void tile_feedback_finish(lv_timer_t *timer)
+{
+    lv_obj_t *tile = s_pressed_tile;
+    list_touch_ctx_t *ctx = s_tile_context;
+    const int idx = s_tile_index;
+    s_tile_timer = NULL;
+    s_pressed_tile = NULL;
+    s_tile_context = NULL;
+    lv_timer_delete(timer);
+    if (!tile) return;
+    lv_obj_remove_state(tile, LV_STATE_USER_1);
+    if (lv_obj_get_screen(tile) != lv_scr_act() || diary_modal()) return;
+    if (ctx && ctx->activate && idx >= 0 && idx < ctx->count) {
+        *ctx->p_sel = idx;
+        if (ctx->p_sel_prev) *ctx->p_sel_prev = idx;
+        ctx->activate(idx);
+    }
+}
+
+static void tile_touch_event_cb(lv_event_t *e)
+{
+    lv_obj_t *tile = (lv_obj_t *)lv_event_get_target(e);
+    const lv_event_code_t code = lv_event_get_code(e);
+    if (code == LV_EVENT_DELETE && tile == s_pressed_tile) {
+        if (s_tile_timer) lv_timer_delete(s_tile_timer);
+        s_tile_timer = NULL;
+        s_pressed_tile = NULL;
+        s_tile_context = NULL;
+        return;
+    }
+    if (code != LV_EVENT_CLICKED || s_tile_timer) return;
+    if(diary_modal()) return;
+    list_touch_ctx_t *ctx = (list_touch_ctx_t *)lv_event_get_user_data(e);
+    if (!ctx || !ctx->activate) return;
+    s_tile_index = (int)lv_obj_get_index(tile);
+    s_tile_context = ctx;
+    s_pressed_tile = tile;
+    lv_obj_add_state(tile, LV_STATE_USER_1);
+    standby_reset_timer();
+#if defined(CONFIG_DRAFTLING_DISPLAY_EPD)
+    const uint32_t feedback_ms = 650;
+#else
+    const uint32_t feedback_ms = 120;
+#endif
+    s_tile_timer = lv_timer_create(tile_feedback_finish, feedback_ms, NULL);
+    if (!s_tile_timer) {
+        s_pressed_tile = NULL;
+        s_tile_context = NULL;
+        lv_obj_remove_state(tile, LV_STATE_USER_1);
+        ctx->activate(s_tile_index);
+    }
+}
 
 static void list_touch_event_cb(lv_event_t *e)
 {
@@ -3719,8 +3859,10 @@ static void list_touch_event_cb(lv_event_t *e)
     int idx = (int)idx32;
     if (idx < 0 || idx >= ctx->count) return;
 
-    if (idx == *ctx->p_sel) {
+    if (ctx->single_tap || idx == *ctx->p_sel) {
         /* Tapped the already-highlighted row -- activate it. */
+        *ctx->p_sel = idx;
+        if (ctx->p_sel_prev) *ctx->p_sel_prev = idx;
         if (ctx->activate) ctx->activate(idx);
     } else {
         /* First tap on a different row -- just move the highlight. */
@@ -3750,8 +3892,11 @@ static void list_touch_attach(lv_obj_t *list, list_touch_ctx_t *ctx)
         /* Remove any prior callback we registered so a second
          * refresh_*() does not stack duplicates. */
         lv_obj_remove_event_cb(btn, list_touch_event_cb);
-        lv_obj_add_event_cb(btn, list_touch_event_cb,
-                            LV_EVENT_CLICKED, ctx);
+        lv_obj_remove_event_cb(btn, tile_touch_event_cb);
+        if (ctx->single_tap)
+            lv_obj_add_event_cb(btn, tile_touch_event_cb, LV_EVENT_ALL, ctx);
+        else
+            lv_obj_add_event_cb(btn, list_touch_event_cb, LV_EVENT_CLICKED, ctx);
     }
 }
 
@@ -3801,7 +3946,7 @@ static void browser_status_hint(char *buf, size_t buf_size)
         return;
     }
 #endif
-    snprintf(buf, buf_size, "F1:Menu  N:New  F2:Rename");
+    snprintf(buf, buf_size, "F1:Home  N:New  F2:Rename");
 }
 
 static void refresh_file_list(const char *select_name = NULL)
@@ -3888,6 +4033,7 @@ static void refresh_file_list(const char *select_name = NULL)
 
 extern "C" void editor_ui_show_file_browser(void)
 {
+    s_home_open = false;
     if (s_pane_count > 1) {
         /* Split: overlay a compact file selector on just the focused
          * pane, keeping the other pane's document on screen. The editor
@@ -3955,6 +4101,8 @@ extern "C" void editor_ui_show_file_browser(void)
 
 extern "C" void editor_ui_show_editor(void)
 {
+    if(!diary_require_keyboard()) return;
+    s_home_open = false;
     s_editor_screen_active = true;
     editor_set_mode(EDITOR_MODE_EDITING);
     sync_battery_labels();
@@ -4019,8 +4167,7 @@ static void update_status_visibility(void)
 
 /* Default status-bar text for the editor screen. Kept in one place
  * so the auto-clear timer and the initial label setup agree. */
-#define EDITOR_DEFAULT_STATUS \
-    "F1:Menu Ctrl+S:Save Ctrl+L:Layout Ctrl+G:Git Esc:Files"
+#define EDITOR_DEFAULT_STATUS ""
 
 /* Restore the status bar of both screens to its standard, no-message
  * state (the same text the screens show when they are first entered).
@@ -4196,6 +4343,140 @@ static void update_list_highlight(lv_obj_t *list, int sel, int prev_sel)
     }
 }
 
+/* Native monochrome app icons; no extra font or bitmap assets. */
+enum app_icon_t { APP_WRITE, APP_NEW, APP_FILES, APP_SETTINGS, APP_SLEEP,
+                  APP_TEXT, APP_LIGHT, APP_KEYBOARD, APP_ADVANCED, APP_HOME,
+                  APP_CALENDAR, APP_SYNC };
+
+static void app_icon_draw(lv_event_t *e)
+{
+    lv_obj_t *obj = (lv_obj_t *)lv_event_get_target(e);
+    lv_area_t area;
+    lv_obj_get_coords(obj, &area);
+    const int icon_size = lv_obj_get_height(obj)<120?36:48;
+    const int x = (area.x1 + area.x2 - icon_size) / 2;
+    const int pressed = lv_obj_has_state(obj, LV_STATE_USER_1) ? 3 : 0;
+    const int y = area.y1 + (icon_size==36?6:10+(lv_obj_get_height(obj)-120)/2) + pressed;
+    lv_draw_line_dsc_t d;
+    lv_draw_line_dsc_init(&d);
+    d.color = lv_obj_get_style_text_color(obj, LV_PART_MAIN);
+    d.width = 3;
+    lv_layer_t *layer = lv_event_get_layer(e);
+    auto line = [&](int x1, int y1, int x2, int y2) {
+        d.p1.x = x + x1*icon_size/48; d.p1.y = y + y1*icon_size/48;
+        d.p2.x = x + x2*icon_size/48; d.p2.y = y + y2*icon_size/48;
+        lv_draw_line(layer, &d);
+    };
+    auto box = [&](int l, int t, int r, int b) {
+        line(l,t,r,t); line(r,t,r,b); line(r,b,l,b); line(l,b,l,t);
+    };
+    switch ((app_icon_t)(intptr_t)lv_event_get_user_data(e)) {
+    case APP_WRITE:
+        line(8,38,13,26); line(13,26,34,5); line(34,5,42,13);
+        line(42,13,21,34); line(21,34,8,38); line(29,10,37,18);
+        line(8,44,42,44); break;
+    case APP_NEW:
+        box(8,3,40,45); line(24,14,24,34); line(14,24,34,24); break;
+    case APP_FILES:
+        line(3,13,3,42); line(3,42,45,42); line(45,42,45,13);
+        line(45,13,23,13); line(23,13,18,6); line(18,6,3,6);
+        line(3,6,3,13); line(3,20,45,20); break;
+    case APP_SETTINGS: case APP_ADVANCED:
+        line(4,10,44,10); line(4,24,44,24); line(4,38,44,38);
+        box(12,5,18,15); box(30,19,36,29); box(17,33,23,43); break;
+    case APP_SLEEP:
+        line(31,4,15,7); line(15,7,6,20); line(6,20,9,35);
+        line(9,35,23,44); line(23,44,38,38); line(38,38,44,28);
+        line(44,28,30,30); line(30,30,20,19); line(20,19,23,9);
+        line(23,9,31,4); break;
+    case APP_TEXT:
+        line(4,40,16,7); line(16,7,28,40); line(9,27,23,27);
+        line(31,40,39,18); line(39,18,47,40); line(34,32,44,32); break;
+    case APP_LIGHT:
+        box(15,15,33,33); line(24,2,24,9); line(24,39,24,46);
+        line(2,24,9,24); line(39,24,46,24); line(7,7,12,12);
+        line(36,36,41,41); line(7,41,12,36); line(36,12,41,7); break;
+    case APP_KEYBOARD:
+        box(2,10,46,38);
+        for (int row=0; row<2; ++row)
+            for (int col=0; col<5; ++col) line(8+col*8,17+row*7,10+col*8,17+row*7);
+        line(13,32,35,32); break;
+    case APP_HOME:
+        line(3,23,24,4); line(24,4,45,23); line(9,18,9,44);
+        line(9,44,39,44); line(39,44,39,18); box(19,29,29,44); break;
+    case APP_CALENDAR:
+        box(4,8,44,44); line(4,18,44,18); line(14,3,14,13); line(34,3,34,13);
+        for(int row=0;row<2;++row) for(int col=0;col<3;++col) box(11+col*11,24+row*10,14+col*11,27+row*10);
+        break;
+    case APP_SYNC:
+        line(6,18,13,7); line(13,7,34,7); line(34,7,43,18);
+        line(43,18,43,6); line(43,18,31,18);
+        line(42,30,35,41); line(35,41,14,41); line(14,41,5,30);
+        line(5,30,5,42); line(5,30,17,30); break;
+    }
+}
+
+static int app_grid_columns(bool home)
+{
+    (void)home;
+    return SCR_W < 600 ? 2 : 3;
+}
+
+static void reset_app_list(lv_obj_t *list)
+{
+    lv_obj_set_flex_flow(list, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_style_pad_row(list, 0, 0);
+    lv_obj_set_style_pad_column(list, 0, 0);
+    lv_obj_set_style_pad_all(list, 0, 0);
+}
+
+static void apply_app_grid(lv_obj_t *list, const app_icon_t *icons, int columns)
+{
+    lv_obj_set_flex_flow(list, LV_FLEX_FLOW_ROW_WRAP);
+    lv_obj_set_style_pad_all(list, 8, 0);
+    lv_obj_set_style_pad_row(list, 12, 0);
+    lv_obj_set_style_pad_column(list, 12, 0);
+    lv_obj_update_layout(list);
+    const int count = (int)lv_obj_get_child_count(list);
+    const int rows = (count + columns - 1) / columns;
+    const int width = (lv_obj_get_content_width(list) - (columns-1)*12) / columns;
+    int height = (lv_obj_get_content_height(list) - (rows-1)*12) / rows;
+    if (height < 96) height = 96;
+    for (int i=0; i<count; ++i) {
+        lv_obj_t *tile = lv_obj_get_child(list, i);
+        /* Tiles own their styling, including press feedback. Remove the
+         * list-button theme instead of assigning a NULL transition:
+         * LVGL dereferences transition descriptors on pointer press. */
+        lv_obj_remove_style_all(tile);
+        lv_obj_set_layout(tile, LV_LAYOUT_NONE);
+        lv_obj_set_size(tile, width, height);
+        lv_obj_set_style_pad_all(tile, 8, 0);
+        lv_obj_set_style_border_width(tile, 2, 0);
+        lv_obj_set_style_border_width(tile, 4, LV_STATE_USER_1);
+        lv_obj_set_style_border_side(tile, LV_BORDER_SIDE_FULL, 0);
+        lv_obj_set_style_border_color(tile, theme_fg(), 0);
+        lv_obj_set_style_radius(tile, 18, 0);
+        /* Override list-button pressed/focus colours; tiles never invert. */
+        lv_obj_set_style_bg_color(tile, theme_bg(), LV_STATE_PRESSED);
+        lv_obj_set_style_bg_opa(tile, LV_OPA_TRANSP, LV_STATE_PRESSED);
+        lv_obj_set_style_text_color(tile, theme_fg(), LV_STATE_PRESSED);
+        lv_obj_set_style_outline_width(tile, 0, LV_STATE_FOCUSED);
+        lv_obj_set_style_shadow_width(tile, 0, LV_STATE_PRESSED);
+        lv_obj_remove_flag(tile, LV_OBJ_FLAG_CLICK_FOCUSABLE);
+        lv_obj_remove_flag(tile, LV_OBJ_FLAG_SCROLLABLE);
+        lv_obj_t *label = lv_obj_get_child(tile, 0);
+        lv_obj_set_width(label, width-20);
+        lv_label_set_long_mode(label, LV_LABEL_LONG_DOT);
+        lv_obj_set_style_text_font(label, FONT_11, 0);
+        lv_obj_set_height(label, lv_font_get_line_height(FONT_11)*2);
+        lv_obj_set_style_text_align(label, LV_TEXT_ALIGN_CENTER, 0);
+        lv_obj_align(label, LV_ALIGN_BOTTOM_MID, 0, height<120?-8:-(height-120)/2);
+        lv_obj_add_event_cb(tile, app_icon_draw, LV_EVENT_DRAW_MAIN_END,
+                            (void *)(intptr_t)icons[i]);
+    }
+}
+
+
 /* F1 menu letter accelerators. Each entry names the menu row, the
  * letter that picks it (resolved with kb_layout_shortcut_char(), like
  * the file browser's N) and the character index of that letter in the
@@ -4209,7 +4490,7 @@ struct menu_hotkey_t {
 };
 
 static const menu_hotkey_t s_menu_hotkeys[] = {
-    { MENU_IDX_SETTINGS,        's', 0  },  /* "Settings..." */
+    { MENU_IDX_SETTINGS,        's', 18 },  /* "Display & editing settings..." */
     { MENU_IDX_BLE_SCAN,        'b', 0  },  /* "BLE: Start scan" */
     { MENU_IDX_WIFI_CONNECT,    'w', 0  },  /* "WiFi: ..." */
     { MENU_IDX_WIFI_NEW,        'n', 6  },  /* "WiFi: New connection..." */
@@ -4220,7 +4501,7 @@ static const menu_hotkey_t s_menu_hotkeys[] = {
 #if defined(CONFIG_DRAFTLING_HAS_USB_MSC)
     { MENU_IDX_USB_MSC,         'u', 12 },  /* "SD card via USB: ..." */
 #endif
-    { MENU_IDX_FORMAT_SD,       'f', 0  },  /* "Format SD card..." */
+    { MENU_IDX_FORMAT_SD,       'e', 0  },  /* "Erase SD card..." */
     { MENU_IDX_HELP,            'h', 0  },  /* "Help (F10)" */
 };
 
@@ -4304,7 +4585,7 @@ static void refresh_menu_items(void)
     char buf[80];
 
     /* 0: Settings */
-    lv_list_add_btn(s_menu_list, NULL, "Settings...");
+    lv_list_add_btn(s_menu_list, NULL, "Display & editing settings...");
 
     /* 1: BLE status */
     snprintf(buf, sizeof(buf), "BLE: %s",
@@ -4366,8 +4647,8 @@ static void refresh_menu_items(void)
 
     /* Format SD card */
     lv_list_add_btn(s_menu_list, NULL,
-                    sd_card_get_handle() ? "Format SD card..."
-                                         : "Format SD card... (no SD card)");
+                    sd_card_get_handle() ? "Erase SD card..."
+                                         : "Erase SD card... (no SD card)");
 
     /* Help */
     lv_list_add_btn(s_menu_list, NULL, "Help (F10)");
@@ -4376,7 +4657,7 @@ static void refresh_menu_items(void)
     lv_list_add_btn(s_menu_list, NULL, "Sleep now");
 
     /* Close menu */
-    lv_list_add_btn(s_menu_list, NULL, "Close menu (Esc / F1)");
+    lv_list_add_btn(s_menu_list, NULL, "Back to Settings (Esc / F1)");
 
     menu_mark_hotkeys();
 
@@ -4406,6 +4687,13 @@ static void update_menu_highlight(void)
 
 static void show_menu(void)
 {
+    show_home();
+}
+
+static void show_advanced_menu(void)
+{
+    s_home_open = false;
+    s_settings_open = false;
     s_menu_open = true;
     s_menu_sel = 0;
     /* Defensive reset: every normal exit from the picker / password
@@ -4503,7 +4791,7 @@ static void close_menu(void)
     if (s_editor_screen_active)
         editor_ui_show_editor();
     else
-        editor_ui_show_file_browser();
+        show_home();
 }
 
 /* ---- Settings screen ---- */
@@ -4579,9 +4867,28 @@ static int find_timeout_option(uint32_t sec)
 #define SETTINGS_IDX_BACK     (_SETTINGS_NEXT_AFTER_UPSIDE_DOWN + 5)
 #define SETTINGS_ITEM_COUNT   (_SETTINGS_NEXT_AFTER_UPSIDE_DOWN + 6)
 
+static bool s_settings_advanced = false;
+static bool s_keyboard_settings_open = false;
+static bool s_forget_keyboard_confirm = false;
+static int s_settings_actions[SETTINGS_ITEM_COUNT + 3];
+static int s_settings_item_count = 0;
+static constexpr int SETTINGS_ACTION_KEYBOARD = 1000;
+static constexpr int SETTINGS_ACTION_ADVANCED = 1001;
+static constexpr int SETTINGS_ACTION_DIARY = 1002;
+static void keyboard_settings_activate(int idx);
+
+static bool everyday_setting(int action)
+{
+    return action == SETTINGS_IDX_TIMEOUT || action == SETTINGS_IDX_FONTSZ ||
+           action == SETTINGS_IDX_BACKLIGHT || action == SETTINGS_IDX_THEME;
+}
+
 static void refresh_settings_items(void)
 {
     lv_obj_clean(s_settings_list);
+    reset_app_list(s_settings_list);
+    if (s_settings_hdr) lv_label_set_text(s_settings_hdr, s_settings_advanced
+        ? "Display & editing" : "Settings");
 
     char buf[80];
     uint32_t cur = standby_get_timeout();
@@ -4591,13 +4898,13 @@ static void refresh_settings_items(void)
         cur_label = TIMEOUT_LABELS[idx];
 
     /* Standby timeout */
-    snprintf(buf, sizeof(buf), "Standby timeout: %s", cur_label);
+    snprintf(buf, sizeof(buf), "Sleep after: %s", cur_label);
     lv_list_add_btn(s_settings_list, NULL, buf);
 
     /* Base font size */
     {
         int fi = find_font_size_option(s_font_size);
-        snprintf(buf, sizeof(buf), "Base font size: %s",
+        snprintf(buf, sizeof(buf), "Text size: %s",
                  FONT_SIZE_LABELS[fi]);
         lv_list_add_btn(s_settings_list, NULL, buf);
     }
@@ -4612,7 +4919,7 @@ static void refresh_settings_items(void)
 
 #if defined(CONFIG_DRAFTLING_DISPLAY_HAS_BACKLIGHT) && !defined(CONFIG_DRAFTLING_DISPLAY_BACKLIGHT_BINARY)
     /* Backlight brightness (LCD boards with a controllable backlight) */
-    snprintf(buf, sizeof(buf), "Backlight: %d%%", s_backlight_pct);
+    snprintf(buf, sizeof(buf), "Light: %d%%", s_backlight_pct);
     lv_list_add_btn(s_settings_list, NULL, buf);
 #endif
 
@@ -4700,14 +5007,68 @@ static void refresh_settings_items(void)
     /* Back */
     lv_list_add_btn(s_settings_list, NULL, "Back (Esc)");
 
+    /* Preserve stable action IDs while displaying only one category.
+     * Delete excluded rows backwards, then map visible rows to actions. */
+    for (int i = SETTINGS_ITEM_COUNT - 1; i >= 0; --i) {
+        if (i == SETTINGS_IDX_BACK) continue;
+        if (everyday_setting(i) == s_settings_advanced)
+            lv_obj_delete(lv_obj_get_child(s_settings_list, i));
+    }
+    s_settings_item_count = 0;
+    for (int i = 0; i < SETTINGS_ITEM_COUNT - 1; ++i) {
+        if (everyday_setting(i) != s_settings_advanced)
+            s_settings_actions[s_settings_item_count++] = i;
+    }
+    if (!s_settings_advanced) {
+        lv_obj_t *back = lv_obj_get_child(s_settings_list, s_settings_item_count);
+        lv_obj_delete(back);
+        lv_list_add_btn(s_settings_list, NULL, "Keyboard...");
+        s_settings_actions[s_settings_item_count++] = SETTINGS_ACTION_KEYBOARD;
+        lv_list_add_btn(s_settings_list, NULL, "Advanced...");
+        s_settings_actions[s_settings_item_count++] = SETTINGS_ACTION_ADVANCED;
+        lv_list_add_btn(s_settings_list, NULL, "Personalise diary");
+        s_settings_actions[s_settings_item_count++] = SETTINGS_ACTION_DIARY;
+        lv_list_add_btn(s_settings_list, NULL, "Back to Home (Esc)");
+    }
+    s_settings_actions[s_settings_item_count++] = SETTINGS_IDX_BACK;
+    if (s_settings_sel >= s_settings_item_count) s_settings_sel = s_settings_item_count - 1;
+
+    if (!s_settings_advanced) {
+        app_icon_t icons[SETTINGS_ITEM_COUNT + 3];
+        for (int i=0; i<s_settings_item_count; ++i) {
+            const int action = s_settings_actions[i];
+            lv_obj_t *label = lv_obj_get_child(lv_obj_get_child(s_settings_list, i), 0);
+            if (action == SETTINGS_ACTION_KEYBOARD) lv_label_set_text(label, "Keyboard");
+            else if (action == SETTINGS_ACTION_ADVANCED) lv_label_set_text(label, "Advanced");
+            else if (action == SETTINGS_IDX_BACK) lv_label_set_text(label, "Home");
+            else {
+                char caption[80];
+                snprintf(caption, sizeof(caption), "%s", lv_label_get_text(label));
+                char *colon = strchr(caption, ':');
+                if (colon && colon[1] == ' ') {
+                    *colon = '\n';
+                    memmove(colon+1, colon+2, strlen(colon+2)+1);
+                }
+                lv_label_set_text(label, caption);
+            }
+            icons[i] = action == SETTINGS_IDX_TIMEOUT ? APP_SLEEP :
+                       action == SETTINGS_IDX_FONTSZ ? APP_TEXT :
+                       action == SETTINGS_IDX_BACKLIGHT ? APP_LIGHT :
+                       action == SETTINGS_ACTION_KEYBOARD ? APP_KEYBOARD :
+                       action == SETTINGS_IDX_BACK ? APP_HOME : APP_ADVANCED;
+        }
+        apply_app_grid(s_settings_list, icons, app_grid_columns(false));
+    }
+
     /* Highlight selection */
-    apply_list_selection_styles(s_settings_list, s_settings_sel);
+    apply_list_selection_styles(s_settings_list, s_settings_advanced ? s_settings_sel : -1);
     s_settings_sel_prev = s_settings_sel;
 
 #if defined(CONFIG_DRAFTLING_TOUCHSCREEN)
     s_settings_touch_ctx.p_sel      = &s_settings_sel;
     s_settings_touch_ctx.p_sel_prev = &s_settings_sel_prev;
     s_settings_touch_ctx.activate   = settings_activate_item;
+    s_settings_touch_ctx.single_tap = !s_settings_advanced;
     list_touch_attach(s_settings_list, &s_settings_touch_ctx);
 #endif
 
@@ -4729,6 +5090,7 @@ static void update_settings_highlight(void)
 static void refresh_theme_picker_items(void)
 {
     lv_obj_clean(s_settings_list);
+    reset_app_list(s_settings_list);
     char buf[80];
     for (int i = 0; i < COLOR_THEME_COUNT; i++) {
         snprintf(buf, sizeof(buf), "%s%s",
@@ -4769,6 +5131,7 @@ static void close_theme_picker(void)
 static void refresh_layouts_picker_items(void)
 {
     lv_obj_clean(s_settings_list);
+    reset_app_list(s_settings_list);
     char buf[80];
     for (int i = 0; i < KB_LAYOUT_COUNT; i++) {
         kb_layout_id_t id = (kb_layout_id_t)i;
@@ -4839,8 +5202,11 @@ static void request_close_settings(void)
     close_settings();
 }
 
-static void show_settings(void)
+static void show_settings(bool advanced)
 {
+    s_home_open = false;
+    s_settings_advanced = advanced;
+    s_keyboard_settings_open = false;
     s_settings_open = true;
     s_menu_open = false;
     s_settings_sel = 0;
@@ -4868,7 +5234,8 @@ static void close_settings(void)
     s_theme_picker_open = false;
 #endif
     s_layouts_picker_open = false;
-    show_menu();
+    if (s_settings_advanced) show_advanced_menu();
+    else show_home();
 }
 
 /* Cycles a settings row's discrete value forward (dir=+1) or backward
@@ -5033,6 +5400,19 @@ static bool settings_cycle_item(int idx, int dir)
 
 static void settings_activate_item(int idx)
 {
+    if (idx < 0 || idx >= s_settings_item_count) return;
+    idx = s_settings_actions[idx];
+    if(idx==SETTINGS_ACTION_DIARY) { diary_personal_show(); return; }
+    if (idx == SETTINGS_ACTION_ADVANCED) {
+        show_advanced_menu();
+        return;
+    }
+    if (idx == SETTINGS_ACTION_KEYBOARD) {
+        s_keyboard_settings_open = true;
+        s_forget_keyboard_confirm = false;
+        keyboard_settings_activate(-1);
+        return;
+    }
     /* Moving away from the factory-reset item cancels confirmation */
     if (idx != SETTINGS_IDX_RESET && s_factory_reset_confirm) {
         s_factory_reset_confirm = false;
@@ -5077,8 +5457,62 @@ static void settings_activate_item(int idx)
     }
 }
 
+static void keyboard_settings_activate(int idx)
+{
+    if (idx != 2) s_forget_keyboard_confirm = false;
+    if (idx == 1) {
+        ble_keyboard_enable();
+        ble_keyboard_start_scan();
+    } else if (idx == 2) {
+        if (s_forget_keyboard_confirm) {
+            s_forget_keyboard_confirm = false;
+            ble_keyboard_forget_all();
+            return;
+        }
+        s_forget_keyboard_confirm = true;
+    } else if (idx == 3) {
+        s_keyboard_settings_open = false;
+        s_forget_keyboard_confirm = false;
+        s_settings_sel = 0;
+        refresh_settings_items();
+        return;
+    } else if (idx == -1) {
+        s_settings_sel = 0;
+    }
+    lv_obj_clean(s_settings_list);
+    reset_app_list(s_settings_list);
+    if (s_settings_hdr) lv_label_set_text(s_settings_hdr, "Keyboard - Esc: Settings");
+    char text[128];
+    snprintf(text, sizeof(text), "Keyboard: %s", ble_keyboard_is_connected()
+             ? ble_keyboard_get_device_name() : "not connected");
+    lv_list_add_btn(s_settings_list, NULL, text);
+    lv_list_add_btn(s_settings_list, NULL, "Search for a keyboard");
+    lv_list_add_btn(s_settings_list, NULL, s_forget_keyboard_confirm
+                    ? "Forget keyboards? Select again to confirm" : "Forget paired keyboards...");
+    lv_list_add_btn(s_settings_list, NULL, "Back (Esc)");
+    apply_list_selection_styles(s_settings_list, s_settings_sel);
+    s_settings_sel_prev = s_settings_sel;
+#if defined(CONFIG_DRAFTLING_TOUCHSCREEN)
+    s_settings_touch_ctx.activate = keyboard_settings_activate;
+    s_settings_touch_ctx.single_tap = false;
+    list_touch_attach(s_settings_list, &s_settings_touch_ctx);
+#endif
+}
+
 static void handle_settings_key(const kb_event_t *ev)
 {
+    if (s_keyboard_settings_open) {
+        if (ev->keycode == KB_KEY_ESCAPE) keyboard_settings_activate(3);
+        else if (ev->keycode == KB_KEY_ENTER) keyboard_settings_activate(s_settings_sel);
+        else if (ev->keycode == KB_KEY_UP || ev->keycode == KB_KEY_DOWN) {
+            s_forget_keyboard_confirm = false;
+            s_settings_sel += (ev->keycode == KB_KEY_UP ? -1 : 1);
+            if (s_settings_sel < 0) s_settings_sel = 0;
+            if (s_settings_sel > 3) s_settings_sel = 3;
+            keyboard_settings_activate(0);
+        }
+        return;
+    }
     if (s_restart_confirm_open) {
         switch (ev->keycode) {
         case KB_KEY_UP:
@@ -5202,6 +5636,8 @@ static void handle_settings_key(const kb_event_t *ev)
         return;
     }
 
+    /* The everyday app grid is touch-only. Technical lists retain keys. */
+    if (!s_settings_advanced) return;
     switch (ev->keycode) {
     case KB_KEY_UP:
         if (s_settings_sel > 0) s_settings_sel--;
@@ -5215,7 +5651,7 @@ static void handle_settings_key(const kb_event_t *ev)
         }
         break;
     case KB_KEY_DOWN:
-        if (s_settings_sel < SETTINGS_ITEM_COUNT - 1) s_settings_sel++;
+        if (s_settings_sel < s_settings_item_count - 1) s_settings_sel++;
         if (s_factory_reset_confirm) {
             s_factory_reset_confirm = false;
             refresh_settings_items();
@@ -5230,10 +5666,10 @@ static void handle_settings_key(const kb_event_t *ev)
         /* Previous value on the highlighted row, without moving the
          * highlight -- a no-op on rows settings_cycle_item() does not
          * own (Theme, Max file, Factory reset, Back). */
-        settings_cycle_item(s_settings_sel, -1);
+        settings_cycle_item(s_settings_actions[s_settings_sel], -1);
         break;
     case KB_KEY_RIGHT:
-        settings_cycle_item(s_settings_sel, 1);
+        settings_cycle_item(s_settings_actions[s_settings_sel], 1);
         break;
     case KB_KEY_ESCAPE:
         request_close_settings();
@@ -5707,7 +6143,7 @@ static void refresh_fmt_picker_items(void)
     switch (s_fmt_step) {
     case FMT_STEP_WIFI:
         lv_label_set_text(s_lbl_menu_hdr,
-                          "Format SD card: keep the WiFi settings?");
+                          "Erase SD card: keep the WiFi settings?");
         snprintf(buf, sizeof(buf), "Keep WiFi settings (%s)", s_fmt_ssid);
         lv_list_add_btn(s_menu_list, NULL, buf);
         lv_list_add_btn(s_menu_list, NULL, "Erase WiFi settings");
@@ -5715,13 +6151,13 @@ static void refresh_fmt_picker_items(void)
         break;
     case FMT_STEP_CONFIRM1:
         lv_label_set_text(s_lbl_menu_hdr,
-                          "Format SD card: ALL files will be erased");
+                          "Erase SD card: ALL files will be erased");
         lv_list_add_btn(s_menu_list, NULL, "Cancel");
         lv_list_add_btn(s_menu_list, NULL, "Erase all files on the SD card");
         break;
     case FMT_STEP_CONFIRM2:
         lv_label_set_text(s_lbl_menu_hdr,
-                          "Really format the SD card? Cannot be undone.");
+                          "Really erase the SD card? Cannot be undone.");
         lv_list_add_btn(s_menu_list, NULL, "Cancel");
         lv_list_add_btn(s_menu_list, NULL,
                         s_fmt_keep_wifi
@@ -5905,7 +6341,7 @@ static void menu_activate_item(int idx)
 {
     switch (idx) {
     case MENU_IDX_SETTINGS:
-        show_settings();
+        show_settings(true);
         break;
     case MENU_IDX_BLE_STATUS: /* no action */
         break;
@@ -5940,39 +6376,7 @@ static void menu_activate_item(int idx)
         close_menu();
         break;
     case MENU_IDX_GIT_SYNC:
-#if defined(CONFIG_DRAFTLING_HAS_USB_MSC)
-        /* Git sync reads and writes the SD card directly (its own
-         * .git/ history plus the working tree), same as any other
-         * file I/O -- refuse it while the card belongs to a USB host,
-         * same as handle_browser_key()'s guard. This item is only
-         * reachable via the F1 menu, which stays reachable so the
-         * user can switch SD-via-USB back off; the menu is not itself
-         * gated the way the file browser is. */
-        if (usb_msc_get_mode() != USB_MSC_MODE_OFF) {
-            editor_ui_set_status("SD card via USB active -- disable it first");
-            break;
-        }
-#endif
-        /* Auto-save unsaved edits so the sync task pushes the latest content. */
-        if (editor_is_modified() && editor_get_file_path()) {
-            editor_save_file();
-        }
-        if (git_sync_is_configured() && wifi_manager_is_connected()) {
-            close_menu();
-            if (git_sync_start(GIT_SYNC_BOTH) == ESP_OK) {
-                editor_ui_set_status("Git: syncing...");
-            } else {
-                char sbuf[128];
-                const char *err = git_sync_get_last_error();
-                snprintf(sbuf, sizeof(sbuf), "Git: %s",
-                         (err && err[0]) ? err : "failed to start sync");
-                editor_ui_set_status(sbuf);
-            }
-        } else if (!wifi_manager_is_connected()) {
-            editor_ui_set_status("Git: connect WiFi first");
-        } else {
-            editor_ui_set_status("Git: not configured");
-        }
+        diary_sync();
         break;
     case MENU_IDX_DRAFTBOX:
 #if defined(CONFIG_DRAFTLING_HAS_USB_MSC)
@@ -6019,7 +6423,7 @@ static void menu_activate_item(int idx)
     case MENU_IDX_HELP:
         /* The help describes the screen the menu was opened from. */
         s_menu_open = false;
-        show_help(s_editor_screen_active ? HELP_FROM_EDITOR : HELP_FROM_BROWSER);
+        show_help(HELP_FROM_ADVANCED);
         break;
     case MENU_IDX_SLEEP:
         /* Leave the menu first so, if we prompt about unsaved changes,
@@ -6034,7 +6438,7 @@ static void menu_activate_item(int idx)
         }
         break;
     case MENU_IDX_CLOSE:
-        close_menu();
+        show_settings();
         break;
     default:
         break;
@@ -6136,7 +6540,7 @@ static void handle_menu_key(const kb_event_t *ev)
         break;
     case KB_KEY_ESCAPE:
     case KB_KEY_F1:
-        close_menu();
+        show_settings();
         break;
     default:
         /* Letter accelerators (drawn bold in the menu). K only moves
@@ -6212,7 +6616,7 @@ static void help_heading(std::string &out, const char *title)
 /* Shortcuts that work both in the editor and in the file browser. */
 static void help_common_rows(std::string &out, int cols, int kc)
 {
-    help_row(out, cols, kc, "F1, Ctrl+M", "Menu");
+    help_row(out, cols, kc, "F1, Ctrl+M", "Home");
     help_row(out, cols, kc, "F10", "This help");
     help_row(out, cols, kc, "Ctrl+1", "Single pane");
     help_row(out, cols, kc, "Ctrl+2", "Split into two equal panes");
@@ -6237,10 +6641,10 @@ static void build_help_text(std::string &out, help_origin_t origin, int cols)
 
     if (origin == HELP_FROM_EDITOR) {
         help_heading(out, "Editor");
-        help_row(out, cols, kc, "Esc", "Back to the file browser (asks to save changes)");
+        help_row(out, cols, kc, "Esc", "Back to Home (asks to save changes)");
         help_row(out, cols, kc, "Ctrl+S", "Save / save as");
-        help_row(out, cols, kc, "Ctrl+O", "Open another file");
-        help_row(out, cols, kc, "Ctrl+N", "New file");
+        help_row(out, cols, kc, "Ctrl+O", "Home (choose My documents to open a file)");
+        help_row(out, cols, kc, "Ctrl+N", "New Markdown document");
         help_row(out, cols, kc, "Ctrl+F", "Find");
         help_row(out, cols, kc, "Ctrl+H", "Find and replace (Tab: switch field, Ctrl+Enter: replace)");
         help_row(out, cols, kc, "Shift+arrows", "Select text");
@@ -6266,7 +6670,7 @@ static void build_help_text(std::string &out, help_origin_t origin, int cols)
         help_row(out, cols, kc, "Enter", "Open the file or folder");
         if (origin == HELP_FROM_INPANE)
             help_row(out, cols, kc, "Esc", "Back to the editor");
-        help_row(out, cols, kc, "N, Ctrl+N", "New file: Markdown, Fountain or plain text");
+        help_row(out, cols, kc, "N, Ctrl+N", "New Markdown document");
         help_row(out, cols, kc, "F2, Alt+R", "Rename the file");
         help_row(out, cols, kc, "Del, Alt+D", "Delete the file (only once it is pushed with Git sync)");
         if (origin == HELP_FROM_INPANE)
@@ -6304,6 +6708,9 @@ static void close_help(void)
 {
     s_help_open = false;
     switch (s_help_origin) {
+    case HELP_FROM_ADVANCED:
+        show_advanced_menu();
+        break;
     case HELP_FROM_EDITOR:
         editor_ui_show_editor();
         break;
@@ -6529,6 +6936,11 @@ static void save_prompt_confirm(void)
     }
     char path[512];
     snprintf(path, sizeof(path), "%s/%s", mp, s_save_buf);
+    const char *current=editor_get_file_path();
+    if((!current || strcmp(path,current)) && sd_card_file_exists(path)) {
+        editor_ui_set_status("Name already exists - choose a different name");
+        return;
+    }
     esp_err_t err = editor_save_file_as(path);
     close_save_prompt();
     if (err == ESP_OK) {
@@ -6553,7 +6965,7 @@ static void handle_save_prompt_key(const kb_event_t *ev)
             restore_default_status();
         else
             editor_ui_set_status(
-                "F1:Menu Ctrl+S:Save Ctrl+L:Layout Ctrl+G:Git Esc:Files");
+                EDITOR_DEFAULT_STATUS);
         return;
     case KB_KEY_LEFT:
         if (s_save_pos > 0) {
@@ -6626,47 +7038,15 @@ static void handle_save_prompt_key(const kb_event_t *ev)
     refresh_save_prompt();
 }
 
-/* ---- New-document format picker logic ---- */
-
-static void refresh_newfmt_prompt(void)
+/* Create a Markdown document in the requested pane. */
+static void create_new_document(newdoc_target_t target)
 {
-    if (!s_newfmt_panel) return;
-    for (int i = 0; i < NEWFMT_COUNT; i++) {
-        if (!s_newfmt_opt_lbl[i]) continue;
-        bool sel = (i == s_newfmt_sel);
-        lv_obj_set_style_bg_color(s_newfmt_opt_lbl[i],
-                                  sel ? theme_fg() : theme_bg(), 0);
-        lv_obj_set_style_bg_opa(s_newfmt_opt_lbl[i], LV_OPA_COVER, 0);
-        lv_obj_set_style_text_color(s_newfmt_opt_lbl[i],
-                                    sel ? theme_bg() : theme_fg(), 0);
+    if (editor_is_modified()) {
+        show_msg_popup("Save your writing first",
+                       "Save your document before starting a new one.", false);
+        return;
     }
-}
-
-static void show_newfmt_prompt(newdoc_target_t target)
-{
-    if (!s_newfmt_panel) return;
-    s_newfmt_target = target;
-    s_newfmt_open = true;
-    s_newfmt_sel = 0;
-    lv_obj_set_parent(s_newfmt_panel, lv_scr_act());
-    lv_obj_remove_flag(s_newfmt_panel, LV_OBJ_FLAG_HIDDEN);
-    lv_obj_move_foreground(s_newfmt_panel);
-    refresh_newfmt_prompt();
-}
-
-static void close_newfmt_prompt(void)
-{
-    s_newfmt_open = false;
-    if (s_newfmt_panel) lv_obj_add_flag(s_newfmt_panel, LV_OBJ_FLAG_HIDDEN);
-}
-
-/* Start a new untitled document in the picked format where the picker
- * was raised from. */
-static void newfmt_prompt_activate(void)
-{
-    editor_doc_format_t f = NEWFMT_FORMATS[s_newfmt_sel];
-    newdoc_target_t target = s_newfmt_target;
-    close_newfmt_prompt();
+    const editor_doc_format_t f = EDITOR_DOC_MARKDOWN;
 
     switch (target) {
     case NEWDOC_BROWSER:
@@ -6695,8 +7075,9 @@ static void newfmt_prompt_activate(void)
             editor_new_file();
             s_panes[0].doc = editor_get_active();
             s_panes[0].has_saved_view = false;   /* adopt the new doc's view */
-        } else {
-            open_into_pane(s_focus, NULL);
+        } else if (!open_into_pane(s_focus, NULL)) {
+            editor_ui_set_status("New failed");
+            return;
         }
         editor_set_format(f);
         ensure_cursor_visible();
@@ -6705,34 +7086,112 @@ static void newfmt_prompt_activate(void)
     }
 }
 
-static void handle_newfmt_prompt_key(const kb_event_t *ev)
+#include "diary_ui.inc"
+#include "diary_reader.inc"
+#include "diary_moments.inc"
+#include "diary_extras.inc"
+
+static void show_home(void)
 {
-    switch (ev->keycode) {
-    case KB_KEY_UP:
-        s_newfmt_sel = (s_newfmt_sel + NEWFMT_COUNT - 1) % NEWFMT_COUNT;
-        refresh_newfmt_prompt();
-        return;
-    case KB_KEY_DOWN:
-        s_newfmt_sel = (s_newfmt_sel + 1) % NEWFMT_COUNT;
-        refresh_newfmt_prompt();
-        return;
-    case KB_KEY_ENTER:
-        newfmt_prompt_activate();
-        return;
-    case KB_KEY_ESCAPE:
-        close_newfmt_prompt();
-        return;
-    default:
-        break;
+    editor_cancel_pending_moment();
+    if(s_clock_editing) { s_clock_offset=s_clock_saved_offset; s_diary_zone=s_clock_saved_zone; s_clock_editing=false; diary_zone_apply(); }
+    /* Leaving the waiting page does not stop pairing or disconnect BLE. */
+    if(s_passkey_panel) lv_obj_add_flag(s_passkey_panel,LV_OBJ_FLAG_HIDDEN);
+    s_diary_waiting_write=false;
+    s_home_open = true;
+    s_help_open = false;
+    close_inpane_browser();
+    s_menu_open = false;
+    s_settings_open = false;
+    s_home_sel = 0;
+    lv_obj_clean(s_home_list);
+    size_t text_len = 0;
+    editor_get_text(&text_len);
+    const char *path = editor_get_file_path();
+    const bool have_current = path || text_len > 0 || editor_is_modified();
+    const char *name = have_current ? path : s_last_document;
+    if (name && *name) {
+        const char *slash = strrchr(name, '/');
+        if (slash) name = slash + 1;
+    } else {
+        name = have_current ? "Untitled document" : "No recent document";
     }
-    /* M / F / T pick a format directly. */
-    char ch = kb_layout_shortcut_char(ev->keycode);
-    int pick = (ch == 'm') ? 0 : (ch == 'f') ? 1 : (ch == 't') ? 2 : -1;
-    if (pick >= 0) {
-        s_newfmt_sel = pick;
-        newfmt_prompt_activate();
+    char label[320];
+    snprintf(label, sizeof(label), "Continue\n%s", name);
+    lv_list_add_btn(s_home_list, NULL, label);
+    lv_list_add_btn(s_home_list, NULL, "Today's entry");
+    lv_list_add_btn(s_home_list, NULL, "Calendar");
+    lv_list_add_btn(s_home_list, NULL, "My documents");
+    lv_list_add_btn(s_home_list, NULL, "Sync & backup");
+    lv_list_add_btn(s_home_list, NULL, "Settings");
+    const app_icon_t icons[] = { APP_WRITE, APP_NEW, APP_CALENDAR, APP_FILES, APP_SYNC, APP_SETTINGS };
+    apply_app_grid(s_home_list, icons, app_grid_columns(true));
+    apply_list_selection_styles(s_home_list, -1);
+    s_home_sel_prev = s_home_sel;
+#if defined(CONFIG_DRAFTLING_TOUCHSCREEN)
+    s_home_touch_ctx.p_sel = &s_home_sel;
+    s_home_touch_ctx.p_sel_prev = &s_home_sel_prev;
+    s_home_touch_ctx.activate = home_activate_item;
+    s_home_touch_ctx.single_tap = true;
+    list_touch_attach(s_home_list, &s_home_touch_ctx);
+#endif
+    lv_indev_reset(NULL, NULL);
+    diary_preferences_load();
+    if(s_home_quote) lv_label_set_text(s_home_quote,diary_pick_quote());
+    diary_home_status();
+    lv_obj_invalidate(s_scr_home);
+    lv_scr_load(s_scr_home);
+    diary_nav_refresh();
+}
+
+extern "C" void editor_ui_show_home(void)
+{
+    show_home();
+}
+
+static void home_activate_item(int idx)
+{
+    standby_reset_timer();
+    if (idx == 0) {
+        size_t text_len = 0;
+        editor_get_text(&text_len);
+        if (editor_get_file_path() || text_len > 0 || editor_is_modified()) {
+            if(editor_get_file_path()) {
+                if(!diary_save_before_leave()) return;
+                diary_read_path(editor_get_file_path());
+            } else editor_ui_show_editor();
+        } else if (*s_last_document) {
+            diary_read_path(s_last_document);
+        } else {
+            show_msg_popup("Nothing to continue", "Choose New document to start writing, or My documents to open a file.", false);
+        }
+    } else if (idx == 1) {
+        diary_today_open();
+    } else if (idx == 2) {
+        struct tm now;
+        if(diary_now(&now)) { s_diary_year=now.tm_year+1900; s_diary_month=now.tm_mon+1; }
+        diary_calendar_show();
+    } else if (idx == 3) {
+        if(!diary_storage_ok()) return;
+        if (editor_is_modified()) {
+            editor_ui_show_editor();
+            show_exit_prompt(true);
+        } else {
+            editor_ui_show_file_browser();
+        }
+    } else if (idx == 4) {
+        diary_sync();
+    } else if (idx == 5) {
+        show_settings();
     }
 }
+
+static void handle_home_key(const kb_event_t *ev)
+{
+    /* Home icons are activated only by touch. */
+    (void)ev;
+}
+
 
 /* ---- Delete-file confirmation logic ---- */
 
@@ -6769,25 +7228,7 @@ static void show_delete_prompt(void)
     }
     const char *name = s_browser_entries[idx].name;
 
-    switch (git_sync_file_status(name)) {
-    case GIT_SYNC_FILE_PUSHED:
-        break;
-    case GIT_SYNC_FILE_NOT_CONFIGURED:
-        editor_ui_set_status("Delete needs Git sync (git.cfg)");
-        return;
-    case GIT_SYNC_FILE_BUSY:
-        editor_ui_set_status("Delete: wait for Git sync to finish");
-        return;
-    case GIT_SYNC_FILE_NOT_PUSHED:
-        editor_ui_set_status("Not on the Git server yet -- sync first (Ctrl+G)");
-        return;
-    case GIT_SYNC_FILE_MODIFIED:
-        editor_ui_set_status("Changed since last push -- sync first (Ctrl+G)");
-        return;
-    default:
-        editor_ui_set_status("Delete: cannot check Git status");
-        return;
-    }
+    if(!diary_storage_ok()) return;
 
     snprintf(s_del_path, sizeof(s_del_path), "%s/%s", sd_card_get_mount_point(), name);
     /* Remember the neighbouring row so the highlight stays in place. */
@@ -6804,7 +7245,7 @@ static void show_delete_prompt(void)
     }
 
     char hdr[96];
-    snprintf(hdr, sizeof(hdr), "Delete %.40s? (kept in Git history)", name);
+    snprintf(hdr, sizeof(hdr), "Move %.40s to Trash?", name);
     lv_label_set_text(s_del_hdr_lbl, hdr);
     s_del_open = true;
     s_del_sel = DELCONF_CANCEL;
@@ -6826,14 +7267,15 @@ static void delete_prompt_activate(void)
     char msg[80];
     esp_err_t err = editor_delete_file(s_del_path);
     if (err == ESP_ERR_INVALID_STATE) {
-        editor_ui_set_status("File is open in a pane -- close it first");
+        editor_ui_set_status("Save changes in every pane before moving this file to Trash");
         return;
     }
     if (err != ESP_OK) {
         editor_ui_set_status("Delete failed!");
         return;
     }
-    snprintf(msg, sizeof(msg), "Deleted %.40s", name);
+    snprintf(msg, sizeof(msg), "Moved to Trash: %.40s", name);
+    invalidate_all_render_caches();
     refresh_file_list(s_del_next_name[0] ? s_del_next_name : NULL);
     editor_ui_set_status(msg);
 }
@@ -6907,7 +7349,10 @@ static void show_leave_prompt(exit_purpose_t purpose)
     refresh_exit_prompt();
 }
 
-static void show_exit_prompt(void)  { show_leave_prompt(EXIT_PURPOSE_BROWSER); }
+static void show_exit_prompt(bool to_browser)
+{
+    show_leave_prompt(to_browser ? EXIT_PURPOSE_BROWSER : EXIT_PURPOSE_HOME);
+}
 static void show_sleep_prompt(void) { show_leave_prompt(EXIT_PURPOSE_SLEEP); }
 
 /* Finish a leave-prompt action once the document is no longer dirty
@@ -6922,6 +7367,8 @@ static void leave_prompt_proceed(exit_purpose_t purpose)
          * wipe every pane's render cache and repaint from scratch. */
         invalidate_all_render_caches();
         editor_ui_refresh();
+    } else if (purpose == EXIT_PURPOSE_HOME) {
+        show_home();
     } else {
         editor_ui_show_file_browser();
     }
@@ -6963,7 +7410,7 @@ static void exit_prompt_activate(void)
     default:
         close_exit_prompt();
         editor_ui_set_status(
-            "F1:Menu Ctrl+S:Save Ctrl+L:Layout Ctrl+G:Git Esc:Files");
+            EDITOR_DEFAULT_STATUS);
         return;
     }
 }
@@ -7061,7 +7508,7 @@ static void close_search_prompt(void)
     s_search_match_start = -1;
     s_search_match_end = -1;
     editor_ui_set_status(
-        "F1:Menu Ctrl+S:Save Ctrl+L:Layout Ctrl+G:Git Esc:Files");
+        EDITOR_DEFAULT_STATUS);
 }
 
 /* Find the next occurrence of s_search_buf starting just after the
@@ -7309,7 +7756,7 @@ static void capture_typing_pre_state(typing_pre_state_t *out)
     out->line        = line;
     out->col         = col;
     out->cur_x       = s_rp->x + lv_obj_get_x(s_cursor);
-    out->cur_y       = s_rp->y + lv_obj_get_y(s_cursor);
+    out->cur_y       = DIARY_HEADER_H + s_rp->y + lv_obj_get_y(s_cursor);
     out->cur_h       = lv_obj_get_height(s_cursor);
     out->modified    = editor_is_modified();
     out->line_chars  = chars;
@@ -7368,7 +7815,7 @@ static bool try_partial_clip_for_typing(const typing_pre_state_t *pre)
     if (2 + max_w + 4 > s_rp->w) return false;
 
     int post_cur_x = s_rp->x + lv_obj_get_x(s_cursor);
-    int post_cur_y = s_rp->y + lv_obj_get_y(s_cursor);
+    int post_cur_y = DIARY_HEADER_H + s_rp->y + lv_obj_get_y(s_cursor);
     int post_cur_h = lv_obj_get_height(s_cursor);
     /* Cursor moved to a different visual row -> the row geometry
      * changed (wrap or scroll), refresh the whole dirty bbox. */
@@ -7751,20 +8198,15 @@ static void handle_editor_key(const kb_event_t *ev)
             show_save_prompt();
             break;
         case 'n':
-            /* New empty document in the focused pane, in the format
-             * picked from the overlay (see newfmt_prompt_activate()). */
-            show_newfmt_prompt(NEWDOC_EDITOR);
+            /* New Markdown document in the focused pane. */
+            create_new_document(NEWDOC_EDITOR);
             return;
         case 'o':
-            /* Opening another file leaves the current document behind.
-             * If it has unsaved changes, prompt to save / discard /
-             * cancel first (same dialog as Esc, whose save and discard
-             * paths both proceed to the file browser); otherwise open
-             * the browser straight away. */
+            /* Files are reached through My documents on Home. */
             if (editor_is_modified()) {
                 show_exit_prompt();
             } else {
-                editor_ui_show_file_browser();
+                show_home();
             }
             return;
         case 'c':
@@ -8043,7 +8485,7 @@ static void handle_editor_key(const kb_event_t *ev)
             return;
         }
         /* No unsaved changes -- leave the editor immediately. */
-        editor_ui_show_file_browser();
+        show_home();
         return;
     default: {
         /* Use keyboard layout to translate keycode to UTF-8 */
@@ -8211,6 +8653,10 @@ static void browser_activate_item(int row)
     char path[512];
     snprintf(path, sizeof(path), "%s/%s",
              sd_card_get_mount_point(), s_browser_entries[idx].name);
+
+#if defined(CONFIG_DRAFTLING_TOUCHSCREEN)
+    if(s_pane_count<=1) { diary_read_path(path); return; }
+#endif
 
     if (s_pane_count <= 1) {
         editor_init();
@@ -8416,13 +8862,13 @@ static void handle_browser_key(const kb_event_t *ev)
      * shortcuts are resolved (see kb_layout_shortcut_char()), not via
      * a raw layout translation -- otherwise the N key would produce a
      * non-Latin character under Ukrainian/Hebrew and this shortcut
-     * would silently stop working. N and Ctrl+N both ask for the new
-     * document's format first. */
+     * would silently stop working. N and Ctrl+N both create a new
+     * Markdown document. */
     char ch = kb_layout_shortcut_char(ev->keycode);
     bool alt = (ev->modifier & (KB_MOD_LALT | KB_MOD_RALT)) != 0;
 
     if (ch == 'n' && !alt) {
-        show_newfmt_prompt(s_inpane_browser_open ? NEWDOC_INPANE
+        create_new_document(s_inpane_browser_open ? NEWDOC_INPANE
                                                  : NEWDOC_BROWSER);
         return;
     }
@@ -8542,6 +8988,8 @@ static void handle_inpane_browser_key(const kb_event_t *ev)
 /* Process a single key event (must be called with LVGL lock held). */
 static void process_key_event(const kb_event_t *ev)
 {
+    s_diary_last_input=lv_tick_get();
+    if(git_sync_get_state()==GIT_SYNC_IN_PROGRESS && lv_scr_act()==s_scr && !diary_modal()) return;
     /* Normalize Keypad Enter to regular Enter so all handlers
      * only need to check for KB_KEY_ENTER. */
     kb_event_t norm = *ev;
@@ -8572,8 +9020,6 @@ static void process_key_event(const kb_event_t *ev)
         handle_msg_popup_key(e);
     } else if (s_save_open) {
         handle_save_prompt_key(e);
-    } else if (s_newfmt_open) {
-        handle_newfmt_prompt_key(e);
     } else if (s_del_open) {
         handle_delete_prompt_key(e);
     } else if (s_exit_open) {
@@ -8594,12 +9040,29 @@ static void process_key_event(const kb_event_t *ev)
         handle_help_key(e);
     } else if (s_menu_open) {
         handle_menu_key(e);
+    } else if(lv_scr_act()==s_diary_screen && s_diary_mode==27) {
+        diary_custom_prompt_key(e);
+    } else if (s_home_open) {
+        handle_home_key(e);
     } else if (s_inpane_browser_open) {
         /* Split-mode in-pane file selector overlays the editor screen
          * (s_editor_screen_active stays true), so it must be checked
          * before handle_editor_key. */
         handle_inpane_browser_key(e);
     } else if (s_editor_screen_active) {
+        if(editor_moment_pending() && e->keycode!=KB_KEY_ESCAPE) {
+            /* Until the first text, no editor command may remove older writing
+             * or create an empty heading. Navigation remains touch based. */
+            bool ctrl=e->modifier & (KB_MOD_LCTRL | KB_MOD_RCTRL);
+            bool ok=true;
+            if(ctrl && kb_layout_shortcut_char(e->keycode)=='v') ok=editor_paste();
+            else if(!ctrl) {
+                const char *text=kb_layout_translate(e->keycode,e->modifier);
+                if(text && (unsigned char)*text>=32) ok=editor_insert_text(text,strlen(text));
+            }
+            if(!ok) show_msg_popup("Entry is full","There is no room for this moment. Your previous writing is unchanged.",false);
+            ensure_cursor_visible(); editor_ui_refresh(); return;
+        }
         handle_editor_key(e);
     } else {
         handle_browser_key(e);
@@ -8808,10 +9271,11 @@ static void apply_pending_passkey(void)
         /* Pairing normally runs while the BLE prompt screen (or the
          * file browser) is shown, so move the overlay onto whichever
          * screen is active, like the other pop-ups. */
-        char buf[96];
+        char buf[160];
         snprintf(buf, sizeof(buf),
                  "Keyboard pairing code:\n%06lu\n"
-                 "Type it on the keyboard, then press Enter",
+                 "Type it on the keyboard, then press Enter.\n"
+                 "Tap this notice to hide it; pairing continues.",
                  (unsigned long)passkey);
         lv_label_set_text(s_passkey_label, buf);
         lv_obj_set_parent(s_passkey_panel, lv_scr_act());
@@ -8878,6 +9342,8 @@ static void apply_pending_connect_state(void)
     display_request_full_refresh();
 
     if (connected) {
+        const bool first_connection = !s_keyboard_connected_once;
+        s_keyboard_connected_once = true;
         /* Flush any stale key events that accumulated while
          * the keyboard was disconnected / reconnecting. */
         if (s_key_queue) {
@@ -8893,7 +9359,12 @@ static void apply_pending_connect_state(void)
              * does not inherit a sticky press that would absorb
              * the first tap. */
             lv_indev_reset(NULL, NULL);
-            if (s_editor_screen_active) {
+            if(s_diary_waiting_write) {
+                s_diary_waiting_write=false;
+                editor_ui_show_editor();
+            } else if (first_connection || s_home_was_open || !s_editor_screen_active) {
+                show_home();
+            } else if (s_editor_screen_active) {
                 /* Restore the editor -- file contents are still in
                  * the gap buffer; no need to close/reopen. */
                 lv_scr_load(s_scr);
@@ -8917,7 +9388,7 @@ static void apply_pending_connect_state(void)
 #endif
                 editor_ui_refresh();
             } else {
-                editor_ui_show_file_browser();
+                show_home();
             }
         }
         if (s_ble_prompt_lbl) {
@@ -8943,10 +9414,18 @@ static void apply_pending_connect_state(void)
         if (other_kbd) {
             return;
         }
+#if defined(CONFIG_DRAFTLING_TOUCHSCREEN)
+        s_repeat_held=false; s_repeat_firing=false;
+        editor_ui_set_status("Keyboard disconnected. Browsing and touch controls still work.");
+        return;
+#endif
 
         /* Keyboard disconnected -- close any open overlays so the
          * UI is in a clean state when we reconnect.  Do NOT call
          * editor_close_file() -- preserve the user's work. */
+        s_home_was_open = s_home_open;
+        s_home_open = false;
+        s_keyboard_settings_open = false;
         s_menu_open = false;
         s_help_open = false;
         s_settings_open = false;
@@ -8957,7 +9436,6 @@ static void apply_pending_connect_state(void)
         s_layouts_picker_open = false;
         s_save_open = false;
         if (s_save_panel) lv_obj_add_flag(s_save_panel, LV_OBJ_FLAG_HIDDEN);
-        close_newfmt_prompt();
         close_delete_prompt();
         s_exit_open = false;
         if (s_exit_panel) lv_obj_add_flag(s_exit_panel, LV_OBJ_FLAG_HIDDEN);
@@ -9313,6 +9791,23 @@ static void git_sync_cb(git_sync_state_t state, const char *message)
      * the recursive lock already held), so blocking is safe. */
     bool final = (state == GIT_SYNC_SUCCESS || state == GIT_SYNC_ERROR);
     if (!draftling_lvgl_port_lock(final ? -1 : 200)) return;
+    /* Network progress can arrive much faster than an e-paper refresh.
+     * Coalesce intermediate messages; always deliver the terminal result. */
+    static uint32_t last_diary_sync_frame=0;
+    if(!final && lv_tick_get()-last_diary_sync_frame<1000) {
+        draftling_lvgl_port_unlock(); return;
+    }
+    last_diary_sync_frame=lv_tick_get();
+    snprintf(s_diary_notice,sizeof(s_diary_notice),"%s%s",
+             state==GIT_SYNC_SUCCESS?"Synced: ":state==GIT_SYNC_ERROR?"Sync failed: ":"Syncing: ",message?message:"");
+    if(state==GIT_SYNC_ERROR) snprintf(s_diary_notice,sizeof(s_diary_notice),"%s",
+        message && (strstr(message,"401") || strstr(message,"403") || strstr(message,"auth"))?
+        "Backup not completed: check your repository sign-in. Saved writing remains on this SD card.":
+        "Backup not completed: check WiFi and the sync destination, then retry. Saved writing remains on this SD card.");
+    if(state==GIT_SYNC_SUCCESS && message && strstr(message,"conflict"))
+        snprintf(s_diary_notice,sizeof(s_diary_notice),"Transfer completed with conflicting edits. Open Review conflicts; do not treat this as a clean backup yet.");
+    if(s_diary_sync_label && lv_scr_act()==s_diary_screen && s_diary_mode==3)
+        lv_label_set_text(s_diary_sync_label,s_diary_notice);
 
     switch (state) {
     case GIT_SYNC_IN_PROGRESS:
@@ -9337,7 +9832,7 @@ static void git_sync_cb(git_sync_state_t state, const char *message)
                  message ? message : "sync complete");
         /* If a file is currently open in the editor, reload it from disk
          * so the user sees any changes that were pulled from the remote. */
-        if (s_editor_screen_active && editor_get_file_path()) {
+        if (s_editor_screen_active && editor_get_file_path() && !editor_is_modified()) {
             const char *path = editor_get_file_path();
             esp_err_t rerr = editor_open_file(path);
             if (rerr == ESP_ERR_NO_MEM) {
@@ -9387,6 +9882,8 @@ static void git_sync_cb(git_sync_state_t state, const char *message)
  * / theme_bg() reflect the desired palette, and any previously-built
  * screens / overlays / timers have been deleted with their pointers
  * NULLed. */
+#include "diary_touch.inc"
+
 static void build_screens(void)
 {
     /* ---- Editor screen ---- */
@@ -9608,7 +10105,7 @@ static void build_screens(void)
     lv_obj_set_width(s_lbl_br_status, SCR_W - 4);
     lv_obj_set_style_text_font(s_lbl_br_status, FONT_11, 0);
     lv_obj_set_style_text_color(s_lbl_br_status, theme_fg(), 0);
-    lv_label_set_text(s_lbl_br_status, "F1:Menu  N:New  F2:Rename");
+    lv_label_set_text(s_lbl_br_status, "F1:Home  N:New  F2:Rename");
 
 #if defined(CONFIG_DRAFTLING_HAS_BATTERY)
     /* Device battery label (right-aligned in browser status bar) */
@@ -9657,6 +10154,31 @@ static void build_screens(void)
      * built-in keyboard and a USB keyboard are both accepted. */
     tab5_kbd_set_callback((kb_event_callback_t)editor_ui_handle_key);
 #endif
+
+    /* ---- Home screen (shown only after keyboard connection) ---- */
+    s_scr_home = lv_obj_create(NULL);
+    lv_obj_set_style_bg_color(s_scr_home, theme_bg(), 0);
+    lv_obj_set_style_pad_all(s_scr_home, 0, 0);
+    lv_obj_remove_flag(s_scr_home, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_t *home_title = lv_label_create(s_scr_home);
+    lv_obj_set_style_text_font(home_title, FONT_18, 0);
+    lv_obj_set_style_text_color(home_title, theme_fg(), 0);
+    lv_label_set_text(home_title, "My diary");
+    lv_obj_set_pos(home_title, 12, 8);
+    s_home_list = lv_list_create(s_scr_home);
+    const int home_top = lv_font_get_line_height(FONT_18) + 20;
+    lv_obj_set_pos(s_home_list, 8, home_top);
+    lv_obj_set_size(s_home_list, SCR_W - 16, SCR_H - home_top - 92);
+    lv_obj_set_style_text_font(s_home_list, FONT_14, 0);
+    lv_obj_set_style_bg_color(s_home_list, theme_bg(), 0);
+    lv_obj_set_style_text_color(s_home_list, theme_fg(), 0);
+    lv_obj_set_style_radius(s_home_list, 0, 0);
+    lv_obj_set_style_border_width(s_home_list, 0, 0);
+    lv_obj_set_style_pad_all(s_home_list, 0, 0);
+    s_home_quote=diary_label(s_scr_home,"",24,SCR_H-80,SCR_W-48,FONT_11);
+    lv_obj_set_style_text_align(s_home_quote,LV_TEXT_ALIGN_CENTER,0);
+    lv_obj_set_height(s_home_quote,72);
+
 
     /* ---- BLE connection prompt screen ---- */
     s_scr_ble_prompt = lv_obj_create(NULL);
@@ -9975,8 +10497,11 @@ static void build_screens(void)
     /* ---- Settings screen ---- */
     s_scr_settings = lv_obj_create(NULL);
     lv_obj_set_style_bg_color(s_scr_settings, theme_bg(), 0);
+    lv_obj_set_style_pad_all(s_scr_settings, 0, 0);
+    lv_obj_remove_flag(s_scr_settings, LV_OBJ_FLAG_SCROLLABLE);
 
-    lv_obj_t *set_hdr = lv_label_create(s_scr_settings);
+    s_settings_hdr = lv_label_create(s_scr_settings);
+    lv_obj_t *set_hdr = s_settings_hdr;
     lv_obj_set_pos(set_hdr, 2, 0);
     lv_obj_set_style_text_font(set_hdr, FONT_11, 0);
     lv_obj_set_style_text_color(set_hdr, theme_fg(), 0);
@@ -10005,6 +10530,10 @@ static void build_screens(void)
     lv_obj_set_style_pad_all(s_passkey_panel, 6, 0);
     lv_obj_remove_flag(s_passkey_panel, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_add_flag(s_passkey_panel, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_add_event_cb(s_passkey_panel,[](lv_event_t *e) {
+        lv_obj_add_flag((lv_obj_t *)lv_event_get_target(e),LV_OBJ_FLAG_HIDDEN);
+        standby_reset_timer();
+    },LV_EVENT_CLICKED,NULL);
 
     s_passkey_label = lv_label_create(s_passkey_panel);
     lv_obj_set_style_text_font(s_passkey_label, FONT_16, 0);
@@ -10062,7 +10591,8 @@ static void build_screens(void)
     {
         int rows = EXIT_OPT_COUNT;
         int exit_row_y = overlay_row_y();
-        int panel_h = exit_row_y + rows * (LINE_H + 2) + 2 * OVERLAY_PAD;
+        int choice_h=std::max(44,(int)lv_font_get_line_height(FONT_11)+12);
+        int panel_h = exit_row_y + rows * choice_h + 2 * OVERLAY_PAD;
         s_exit_panel = lv_obj_create(s_scr);
         lv_obj_set_size(s_exit_panel, SCR_W - 20, panel_h);
         lv_obj_set_pos(s_exit_panel, 10, (SCR_H - panel_h) / 2);
@@ -10089,43 +10619,12 @@ static void build_screens(void)
             lv_obj_set_width(s_exit_opt_lbl[i], SCR_W - 20 - 12);
             lv_obj_set_style_pad_hor(s_exit_opt_lbl[i], 2, 0);
             lv_label_set_text(s_exit_opt_lbl[i], EXIT_OPT_LABELS[i]);
-            lv_obj_set_pos(s_exit_opt_lbl[i], 0, exit_row_y + i * (LINE_H + 2));
+            lv_obj_set_height(s_exit_opt_lbl[i],choice_h);
+            lv_obj_set_style_pad_top(s_exit_opt_lbl[i],8,0);
+            lv_obj_set_pos(s_exit_opt_lbl[i], 0, exit_row_y + i * choice_h);
         }
     }
 
-    /* ---- New-document format picker (moved onto the active screen
-     * when shown) ---- */
-    {
-        int row_y = overlay_row_y();
-        int panel_h = row_y + NEWFMT_COUNT * (LINE_H + 2) + 2 * OVERLAY_PAD;
-        s_newfmt_panel = lv_obj_create(s_scr);
-        lv_obj_set_size(s_newfmt_panel, SCR_W - 20, panel_h);
-        lv_obj_set_pos(s_newfmt_panel, 10, (SCR_H - panel_h) / 2);
-        lv_obj_set_style_bg_color(s_newfmt_panel, theme_bg(), 0);
-        lv_obj_set_style_bg_opa(s_newfmt_panel, LV_OPA_COVER, 0);
-        lv_obj_set_style_border_color(s_newfmt_panel, theme_fg(), 0);
-        lv_obj_set_style_border_width(s_newfmt_panel, 2, 0);
-        lv_obj_set_style_radius(s_newfmt_panel, 4, 0);
-        lv_obj_set_style_pad_all(s_newfmt_panel, OVERLAY_PAD, 0);
-        lv_obj_remove_flag(s_newfmt_panel, LV_OBJ_FLAG_SCROLLABLE);
-        lv_obj_add_flag(s_newfmt_panel, LV_OBJ_FLAG_HIDDEN);
-
-        lv_obj_t *hdr = lv_label_create(s_newfmt_panel);
-        lv_obj_set_style_text_font(hdr, FONT_11, 0);
-        lv_obj_set_style_text_color(hdr, theme_fg(), 0);
-        lv_label_set_text(hdr, "New file format (Enter/Esc):");
-        lv_obj_set_pos(hdr, 0, 0);
-
-        for (int i = 0; i < NEWFMT_COUNT; i++) {
-            s_newfmt_opt_lbl[i] = lv_label_create(s_newfmt_panel);
-            lv_obj_set_style_text_font(s_newfmt_opt_lbl[i], FONT_11, 0);
-            lv_obj_set_style_text_color(s_newfmt_opt_lbl[i], theme_fg(), 0);
-            lv_obj_set_width(s_newfmt_opt_lbl[i], SCR_W - 20 - 12);
-            lv_obj_set_style_pad_hor(s_newfmt_opt_lbl[i], 2, 0);
-            lv_label_set_text(s_newfmt_opt_lbl[i], NEWFMT_LABELS[i]);
-            lv_obj_set_pos(s_newfmt_opt_lbl[i], 0, row_y + i * (LINE_H + 2));
-        }
-    }
 
     /* ---- Message pop-up (moved onto the active screen when shown) ---- */
     {
@@ -10163,7 +10662,7 @@ static void build_screens(void)
         lv_obj_set_style_text_font(s_msg_hint_lbl, FONT_11, 0);
         lv_obj_set_style_text_color(s_msg_hint_lbl, theme_fg(), 0);
         lv_obj_set_width(s_msg_hint_lbl, LV_PCT(100));
-        lv_label_set_text(s_msg_hint_lbl, "Enter / Esc: close");
+        lv_label_set_text(s_msg_hint_lbl, "Tap to close");
     }
 
     /* ---- Delete-file confirmation (moved onto the active screen when
@@ -10171,7 +10670,8 @@ static void build_screens(void)
     {
         static const char *const labels[DELCONF_COUNT] = { "Delete", "Cancel" };
         int row_y = overlay_row_y();
-        int panel_h = row_y + DELCONF_COUNT * (LINE_H + 2) + 2 * OVERLAY_PAD;
+        int choice_h=std::max(44,(int)lv_font_get_line_height(FONT_11)+12);
+        int panel_h = row_y + DELCONF_COUNT * choice_h + 2 * OVERLAY_PAD;
         s_del_panel = lv_obj_create(s_scr);
         lv_obj_set_size(s_del_panel, SCR_W - 20, panel_h);
         lv_obj_set_pos(s_del_panel, 10, (SCR_H - panel_h) / 2);
@@ -10199,7 +10699,9 @@ static void build_screens(void)
             lv_obj_set_width(s_del_opt_lbl[i], SCR_W - 20 - 12);
             lv_obj_set_style_pad_hor(s_del_opt_lbl[i], 2, 0);
             lv_label_set_text(s_del_opt_lbl[i], labels[i]);
-            lv_obj_set_pos(s_del_opt_lbl[i], 0, row_y + i * (LINE_H + 2));
+            lv_obj_set_height(s_del_opt_lbl[i],choice_h);
+            lv_obj_set_style_pad_top(s_del_opt_lbl[i],8,0);
+            lv_obj_set_pos(s_del_opt_lbl[i], 0, row_y + i * choice_h);
         }
     }
 
@@ -10281,6 +10783,35 @@ static void build_screens(void)
 
     /* ---- Key repeat timer ---- */
     s_repeat_timer = lv_timer_create(key_repeat_cb, KEY_REPEAT_RATE_MS, NULL);
+#if defined(CONFIG_DRAFTLING_TOUCHSCREEN)
+    for(auto screen:{s_scr,s_scr_browser,s_scr_home,s_scr_ble_prompt,s_scr_menu,s_scr_help,s_scr_settings})
+        diary_header_reserve(screen);
+    diary_header_build();
+#if defined(CONFIG_DRAFTLING_HAS_BATTERY)
+    for(auto label:{s_lbl_dev_batt,s_lbl_br_dev_batt,s_lbl_ble_dev_batt})
+        if(label) lv_obj_add_flag(label,LV_OBJ_FLAG_HIDDEN);
+#endif
+    s_diary_nav=lv_obj_create(lv_layer_top());
+    lv_obj_remove_style_all(s_diary_nav);
+    lv_obj_set_pos(s_diary_nav,0,PANEL_H-NAV_H); lv_obj_set_size(s_diary_nav,SCR_W,NAV_H);
+    lv_obj_set_style_bg_color(s_diary_nav,theme_bg(),0);
+    lv_obj_set_style_bg_opa(s_diary_nav,LV_OPA_COVER,0);
+    lv_obj_remove_flag(s_diary_nav,LV_OBJ_FLAG_SCROLLABLE);
+    const char *nav_names[]={"Home","Back","Save","Tools"};
+    for(int i=0;i<4;++i) diary_button(s_diary_nav,nav_names[i],i*(SCR_W/4)+3,2,SCR_W/4-6,NAV_H-4,diary_nav_event,i);
+    lv_obj_add_flag(s_diary_nav,LV_OBJ_FLAG_HIDDEN);
+    s_diary_timer=lv_timer_create(diary_tick,200,NULL);
+    for(int i=0;i<EXIT_OPT_COUNT;++i) {
+        lv_obj_add_flag(s_exit_opt_lbl[i],LV_OBJ_FLAG_CLICKABLE);
+        lv_obj_set_ext_click_area(s_exit_opt_lbl[i],0);
+        lv_obj_add_event_cb(s_exit_opt_lbl[i],diary_choice_event,LV_EVENT_CLICKED,(void *)(intptr_t)(100+i));
+    }
+    for(int i=0;i<DELCONF_COUNT;++i) {
+        lv_obj_add_flag(s_del_opt_lbl[i],LV_OBJ_FLAG_CLICKABLE);
+        lv_obj_set_ext_click_area(s_del_opt_lbl[i],0);
+        lv_obj_add_event_cb(s_del_opt_lbl[i],diary_choice_event,LV_EVENT_CLICKED,(void *)(intptr_t)(200+i));
+    }
+#endif
 
     /* Register WiFi and Git sync status callbacks */
     wifi_manager_set_callback(wifi_state_cb);
@@ -10291,7 +10822,11 @@ static void build_screens(void)
     battery_labels_repaint();
 
     /* Start on BLE prompt screen (transitions to file browser on connect) */
+#if defined(CONFIG_DRAFTLING_TOUCHSCREEN)
+    show_home();
+#else
     lv_scr_load(s_scr_ble_prompt);
+#endif
 }
 
 /* Tear down every screen, overlay and screen-bound timer that was
@@ -10319,6 +10854,13 @@ static void teardown_screens(void)
      * bars, line labels, the passkey / save / search overlays
      * parented to s_scr, the wifi icons, etc.) are deleted
      * automatically with their parent. */
+    if (s_scr_home)       { lv_obj_delete(s_scr_home);       s_scr_home       = NULL; }
+    if (s_diary_timer) { lv_timer_delete(s_diary_timer); s_diary_timer=NULL; }
+    if (s_diary_nav) { lv_obj_delete(s_diary_nav); s_diary_nav=NULL; }
+    if (s_diary_header) { lv_obj_delete(s_diary_header); s_diary_header=NULL; }
+    if (s_diary_screen) { lv_obj_delete(s_diary_screen); s_diary_screen=NULL; }
+    s_home_quote=NULL; s_home_date=NULL; s_diary_sync_label=NULL;
+    s_home_list = NULL;
     if (s_scr_browser)    { lv_obj_delete(s_scr_browser);    s_scr_browser    = NULL; }
     if (s_scr_menu)       { lv_obj_delete(s_scr_menu);       s_scr_menu       = NULL; }
     if (s_scr_help)       { lv_obj_delete(s_scr_help);       s_scr_help       = NULL; }
@@ -10355,6 +10897,7 @@ static void teardown_screens(void)
     s_menu_list = s_lbl_menu_hdr = NULL;
     s_lbl_help_hdr = s_help_cont = s_help_lbl = NULL;
     s_settings_list = NULL;
+    s_settings_hdr = NULL;
     s_ble_prompt_lbl = NULL;
     s_passkey_panel = s_passkey_label = NULL;
     s_save_panel = s_save_hdr_lbl = s_save_name_lbl = s_save_cur = NULL;
@@ -10363,8 +10906,6 @@ static void teardown_screens(void)
     s_msg_panel = s_msg_title_lbl = s_msg_text_lbl = s_msg_hint_lbl = NULL;
     s_exit_panel = s_exit_hdr_lbl = NULL;
     s_exit_opt_lbl[0] = s_exit_opt_lbl[1] = s_exit_opt_lbl[2] = NULL;
-    s_newfmt_panel = NULL;
-    s_newfmt_opt_lbl[0] = s_newfmt_opt_lbl[1] = s_newfmt_opt_lbl[2] = NULL;
     s_del_panel = s_del_hdr_lbl = NULL;
     s_del_opt_lbl[0] = s_del_opt_lbl[1] = NULL;
     s_search_panel = s_search_hdr_lbl = NULL;
@@ -10393,7 +10934,6 @@ static void teardown_screens(void)
     s_msg_open                = false;
     s_msg_busy                = false;
     s_exit_open               = false;
-    s_newfmt_open             = false;
     s_del_open                = false;
     s_search_open             = false;
     s_search_replace_mode     = false;
@@ -10414,13 +10954,14 @@ static void rebuild_screens_for_theme(void)
     /* Remember which screen the user is on so we can restore it. */
     lv_obj_t *prev_active = lv_scr_act();
     bool was_browser     = (prev_active == s_scr_browser);
+    bool was_home        = (prev_active == s_scr_home);
     bool was_menu        = (prev_active == s_scr_menu);
     bool was_settings    = (prev_active == s_scr_settings);
     bool was_ble_prompt  = (prev_active == s_scr_ble_prompt);
     bool was_editor      = (prev_active == s_scr);
     /* If lv_scr_act returned something we did not recognise (should
      * not happen) fall back to the editor screen. */
-    if (!was_browser && !was_menu && !was_settings &&
+    if (!was_home && !was_browser && !was_menu && !was_settings &&
         !was_ble_prompt && !was_editor) {
         was_editor = true;
     }
@@ -10430,13 +10971,15 @@ static void rebuild_screens_for_theme(void)
     build_screens();
 
     /* Restore the previously-active screen and re-paint its content. */
-    if (was_browser) {
+    if (was_home) {
+        show_home();
+    } else if (was_browser) {
         refresh_file_list();
         lv_scr_load(s_scr_browser);
     } else if (was_menu) {
-        show_menu();        /* refreshes items + loads s_scr_menu */
+        show_advanced_menu();
     } else if (was_settings) {
-        show_settings();    /* refreshes items + loads s_scr_settings */
+        show_settings(s_settings_advanced);
     } else if (was_ble_prompt) {
         lv_scr_load(s_scr_ble_prompt);
     } else {
@@ -10460,6 +11003,15 @@ extern "C" void editor_ui_init(void)
 #endif
 
     load_font_size_from_nvs();
+    {
+        nvs_handle_t h;
+        size_t capacity = sizeof(s_last_document);
+        if (nvs_open(NVS_NS_EDITOR, NVS_READONLY, &h) == ESP_OK) {
+            if (nvs_get_str(h, "last_document", s_last_document, &capacity) != ESP_OK)
+                s_last_document[0] = '\0';
+            nvs_close(h);
+        }
+    }
 #if defined(CONFIG_DRAFTLING_DISPLAY_COLOR)
     load_theme_from_nvs();
 #endif

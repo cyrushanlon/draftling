@@ -1,4 +1,6 @@
 #pragma once
+#include <stdbool.h>
+#include <time.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -9,6 +11,8 @@ void editor_ui_refresh(void);
 void editor_ui_handle_key(const void *event);
 void editor_ui_show_file_browser(void);
 void editor_ui_show_editor(void);
+void editor_ui_show_home(void);
+void editor_ui_set_clock_writer(bool (*writer)(time_t utc));
 void editor_ui_set_status(const char *msg);
 
 /* Display a persistent (non-auto-clearing) status message. Used for

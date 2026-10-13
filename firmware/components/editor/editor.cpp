@@ -10,6 +10,7 @@
 #include "editor.h"
 #include "sd_card.h"
 #include "git_sync.h"
+#include "diary_store.h"
 
 static const char *TAG = "Editor";
 
@@ -34,6 +35,8 @@ struct editor_doc_s {
     size_t buf_size;      /* allocated size of buf (and flat - 1) */
 
     char   path[256];     /* backing file path, "" when untitled */
+    char   moment_prefix[192]; /* Deferred until the first nonblank input. */
+    bool   moment_new_path;
     bool   modified;
     bool   flat_dirty;
     editor_doc_format_t format; /* Markdown, Fountain or plain text */
@@ -128,6 +131,8 @@ static void doc_reset_empty(editor_doc_t *d)
     d->gap_start   = 0;
     d->gap_end     = d->buf_size;
     d->path[0]     = '\0';
+    d->moment_prefix[0] = '\0';
+    d->moment_new_path = false;
     d->modified    = false;
     d->format      = EDITOR_DOC_MARKDOWN;
     d->mode        = EDITOR_MODE_NORMAL;
@@ -219,7 +224,7 @@ static editor_doc_t *doc_find_by_path(const char *path)
 {
     if (!path || path[0] == '\0') return NULL;
     for (int i = 0; i < EDITOR_MAX_DOCS; i++) {
-        if (s_docs[i].in_use && strcmp(s_docs[i].path, path) == 0)
+        if (s_docs[i].in_use && strcmp(s_docs[i].path, path) == 0 && s_docs[i].modified)
             return &s_docs[i];
     }
     return NULL;
@@ -363,6 +368,7 @@ static void editor_load_meta(void)
 
 extern "C" void editor_save_meta(void)
 {
+    if(editor_moment_pending() && s_active->moment_new_path) return;
     if (s_path[0] == '\0') return;
     char meta[320];
     meta_path_for(s_path, meta, sizeof(meta));
@@ -518,6 +524,7 @@ extern "C" esp_err_t editor_open_file(const char *path)
     }
     s_gap_start = written;
     s_gap_end   = s_buf_size;
+    s_active->moment_prefix[0]=0; s_active->moment_new_path=false;
     free(data);
 
     strncpy(s_path, path, sizeof(s_path) - 1);
@@ -541,9 +548,12 @@ extern "C" esp_err_t editor_open_file(const char *path)
 
 extern "C" esp_err_t editor_save_file(void)
 {
+    if(editor_moment_pending() && !s_modified) return ESP_OK;
     if (s_path[0] == '\0') return ESP_ERR_INVALID_STATE;
     size_t len;
     const char *text = editor_get_text(&len);
+    if(s_modified && !diary_archive(sd_card_get_mount_point(),s_path,"versions"))
+        return ESP_FAIL;
     esp_err_t ret = sd_card_write_file(s_path, text, len);
     if (ret == ESP_OK) { s_modified = false; ESP_LOGI(TAG, "Saved: %s", s_path); }
     return ret;
@@ -551,12 +561,16 @@ extern "C" esp_err_t editor_save_file(void)
 
 extern "C" esp_err_t editor_save_file_as(const char *path)
 {
+    char previous[sizeof(s_path)]; memcpy(previous,s_path,sizeof(previous));
+    editor_doc_format_t previous_format=s_format;
     strncpy(s_path, path, sizeof(s_path) - 1);
     s_path[sizeof(s_path) - 1] = '\0';
     /* The extension picks the format; any other name keeps the mode
      * the document was written in. */
     editor_path_format(path, &s_format);
-    return editor_save_file();
+    esp_err_t result=editor_save_file();
+    if(result!=ESP_OK) { memcpy(s_path,previous,sizeof(s_path)); s_format=previous_format; }
+    return result;
 }
 
 static bool has_ext(const char *path, size_t n, const char *ext)
@@ -605,8 +619,18 @@ extern "C" esp_err_t editor_delete_file(const char *path)
         if (s_docs[i].in_use && strcmp(s_docs[i].path, path) == 0)
             return ESP_ERR_INVALID_STATE;
     }
+    if(!diary_archive(sd_card_get_mount_point(),path,"trash")) return ESP_FAIL;
     esp_err_t err = sd_card_delete_file(path);
     if (err != ESP_OK) return err;
+
+    /* Clean open views must not resurrect a trashed file on the next save. */
+    editor_doc_t *previous=s_active;
+    for(int i=0;i<EDITOR_MAX_DOCS;++i) {
+        if(s_docs[i].in_use && strcmp(s_docs[i].path,path)==0) {
+            s_active=&s_docs[i]; editor_new_file();
+        }
+    }
+    s_active=previous;
 
     char meta[320];
     meta_path_for(path, meta, sizeof(meta));
@@ -652,6 +676,7 @@ extern "C" esp_err_t editor_rename_file(const char *old_path, const char *new_pa
 
 extern "C" void editor_new_file(void)
 {
+    editor_cancel_pending_moment();
     s_gap_start = 0;
     s_gap_end   = s_buf_size;
     s_path[0]   = '\0';
@@ -665,6 +690,7 @@ extern "C" void editor_new_file(void)
 
 extern "C" void editor_close_file(void)
 {
+    editor_cancel_pending_moment();
     /* Persist cursor/scroll metadata before we drop the path so the
      * next open can resume at the same position. */
     editor_save_meta();
@@ -1098,6 +1124,7 @@ extern "C" void editor_move_word_right(void)
 
 extern "C" bool editor_insert_char(char c)
 {
+    if(editor_moment_pending()) return editor_insert_text(&c,1);
     /* Reserve a small safety margin so we never completely fill the
      * buffer (matches editor_open_file() / editor_replace_range()). */
     if (content_len() + 1 > s_buf_size - 64) {
@@ -1116,15 +1143,49 @@ extern "C" bool editor_insert_char(char c)
 extern "C" bool editor_insert_text(const char *text, size_t len)
 {
     if (!text || len == 0) return true;
-    if (content_len() + len > s_buf_size - 64) {
+    size_t prefix_len=strlen(s_active->moment_prefix);
+    if(prefix_len) {
+        bool meaningful=false;
+        for(size_t i=0;i<len;++i) if((unsigned char)text[i]>32) meaningful=true;
+        if(!meaningful) return true; /* No empty sections or whitespace files. */
+    }
+    if (content_len() + len + prefix_len > s_buf_size - 64) {
         ESP_LOGW(TAG, "Editor buffer full (%u KB), rejecting %zu-byte insert",
                  (unsigned)(s_buf_size / 1024), len);
         return false;
+    }
+    if(prefix_len) {
+        editor_clear_selection(); editor_move_doc_end();
+        memcpy(s_buf+s_gap_start,s_active->moment_prefix,prefix_len);
+        s_gap_start+=prefix_len; s_active->moment_prefix[0]=0;
+        s_active->moment_new_path=false;
     }
     for (size_t i = 0; i < len; i++) {
         if (!editor_insert_char(text[i])) return false;
     }
     return true;
+}
+
+extern "C" bool editor_prepare_moment(const char *path, const char *prefix)
+{
+    if(!s_active || !path || !prefix || !*prefix || strlen(path)>=sizeof(s_path) ||
+       strlen(prefix)>=sizeof(s_active->moment_prefix)) return false;
+    if(s_path[0] && strcmp(path,s_path)) return false;
+    if(!s_path[0] && content_len()) return false;
+    s_active->moment_new_path=!s_path[0];
+    strcpy(s_path,path); strcpy(s_active->moment_prefix,prefix);
+    editor_clear_selection(); editor_move_doc_end();
+    return true;
+}
+extern "C" bool editor_moment_pending(void)
+{
+    return s_active && s_active->moment_prefix[0];
+}
+extern "C" void editor_cancel_pending_moment(void)
+{
+    if(!editor_moment_pending()) return;
+    if(s_active->moment_new_path) s_path[0]=0;
+    s_active->moment_prefix[0]=0; s_active->moment_new_path=false;
 }
 
 extern "C" bool editor_insert_newline(void)

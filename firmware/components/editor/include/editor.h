@@ -184,6 +184,11 @@ void editor_move_word_right(void);
 bool editor_insert_char(char c);
 bool editor_insert_text(const char *text, size_t len);
 bool editor_insert_newline(void);
+/* Defer a diary section until actual text is entered. An empty new document
+ * can be bound to path without creating a file. Prefix is inserted once. */
+bool editor_prepare_moment(const char *path, const char *prefix);
+bool editor_moment_pending(void);
+void editor_cancel_pending_moment(void);
 void editor_delete_back(void);
 void editor_delete_forward(void);
 void editor_delete_line(void);

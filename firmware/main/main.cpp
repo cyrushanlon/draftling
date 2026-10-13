@@ -1,5 +1,7 @@
 #include <cstdio>
 #include <cinttypes>
+#include <ctime>
+#include <sys/time.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
 #include <esp_log.h>
@@ -1888,6 +1890,44 @@ static void pre_sleep_tab5_deinit(void)
 }
 #endif /* CONFIG_DRAFTLING_MODEL_M5STACK_TAB5 */
 
+#if defined(CONFIG_DRAFTLING_RTC_BM8563)
+static i2c_master_dev_handle_t s_diary_rtc = NULL;
+static bool diary_rtc_write(time_t utc)
+{
+    if (!s_diary_rtc) return false;
+    struct tm t;
+    gmtime_r(&utc, &t);
+    auto bcd = [](int n) { return (uint8_t)(((n/10)<<4)|(n%10)); };
+    uint8_t start[] = {0,0};
+    uint8_t data[] = {2,bcd(t.tm_sec),bcd(t.tm_min),bcd(t.tm_hour),
+                      bcd(t.tm_mday),(uint8_t)t.tm_wday,bcd(t.tm_mon+1),bcd(t.tm_year%100)};
+    return i2c_master_transmit(s_diary_rtc,start,sizeof(start),200)==ESP_OK &&
+           i2c_master_transmit(s_diary_rtc,data,sizeof(data),200)==ESP_OK;
+}
+static void diary_rtc_init(i2c_master_bus_handle_t bus)
+{
+    if (!bus) return;
+    i2c_device_config_t cfg = {};
+    cfg.dev_addr_length=I2C_ADDR_BIT_LEN_7; cfg.device_address=0x51; cfg.scl_speed_hz=400000;
+    if (i2c_master_bus_add_device(bus,&cfg,&s_diary_rtc)!=ESP_OK) return;
+    uint8_t reg=2, r[7];
+    if (i2c_master_transmit_receive(s_diary_rtc,&reg,1,r,7,200)!=ESP_OK || (r[0]&0x80)) {
+        ESP_LOGW(TAG,"Diary RTC unavailable or time invalid; use touch Date & time");
+        return;
+    }
+    auto bcd=[](uint8_t n){ return (n>>4)*10+(n&15); };
+    struct tm t = {};
+    t.tm_sec=bcd(r[0]&0x7f); t.tm_min=bcd(r[1]&0x7f); t.tm_hour=bcd(r[2]&0x3f);
+    t.tm_mday=bcd(r[3]&0x3f); t.tm_mon=bcd(r[5]&0x1f)-1; t.tm_year=100+bcd(r[6]);
+    if(t.tm_mon<0 || t.tm_mon>11 || t.tm_mday<1 || t.tm_mday>31 ||
+       t.tm_hour>23 || t.tm_min>59 || t.tm_sec>59 || t.tm_year<120) return;
+    setenv("TZ","UTC0",1); tzset();
+    struct timeval tv = {mktime(&t),0};
+    settimeofday(&tv,NULL);
+    ESP_LOGI(TAG,"Diary clock loaded from BM8563 (UTC)");
+}
+#endif
+
 extern "C" void app_main(void)
 {
     ESP_LOGI(TAG, "Draftling - %s", BOARD_NAME);
@@ -2206,6 +2246,10 @@ extern "C" void app_main(void)
         }
     }
     display_set_shared_i2c_bus(shared_i2c_bus);
+#if defined(CONFIG_DRAFTLING_RTC_BM8563)
+    diary_rtc_init(shared_i2c_bus);
+    editor_ui_set_clock_writer(diary_rtc_write);
+#endif
 #if defined(CONFIG_DRAFTLING_MODEL_M5STACK_PAPERMONO)
     /* M5Stack PaperMono: the M5PM1 power-management chip must be
      * awake (I2C idle sleep and watchdog off, rails on) before
@@ -3106,7 +3150,7 @@ extern "C" void app_main(void)
          * straight to the file browser; the BLE connect callback will
          * not fire while BLE is disabled. */
         if (draftling_lvgl_port_lock(-1)) {
-            editor_ui_show_file_browser();
+            editor_ui_show_home();
             draftling_lvgl_port_unlock();
         }
         ble_keyboard_init();
@@ -3125,6 +3169,7 @@ extern "C" void app_main(void)
             draftling_lvgl_port_unlock();
         }
         ble_keyboard_init();
+        /* BLE scans/reconnects in the background; touch Home stays usable. */
     }
 
 #if defined(CONFIG_DRAFTLING_TOUCHSCREEN)
@@ -3188,6 +3233,13 @@ extern "C" void app_main(void)
          * once, inside LVGL. */
         tcfg.logical_width  = DISPLAY_LOGICAL_WIDTH;
         tcfg.logical_height = DISPLAY_LOGICAL_HEIGHT;
+#if defined(CONFIG_DRAFTLING_DISPLAY_XTEINK_EPD)
+        /* This backend offsets the canvas by the physical bezel inset. */
+        tcfg.crop_left = display_margin_left();
+        tcfg.crop_right = display_margin_right();
+        tcfg.crop_top = display_margin_top();
+        tcfg.crop_bottom = display_margin_bottom();
+#endif
         tcfg.swap_xy  = TOUCH_SWAP_XY  ? true : false;
         tcfg.mirror_x = TOUCH_MIRROR_X ? true : false;
         tcfg.mirror_y = TOUCH_MIRROR_Y ? true : false;

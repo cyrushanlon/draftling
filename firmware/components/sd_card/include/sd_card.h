@@ -28,6 +28,8 @@ esp_err_t sd_card_init_spi(int spi_host, int miso, int mosi, int sck,
                            int cs, int enable_gpio, const char *mount_point);
 esp_err_t sd_card_deinit(void);
 bool sd_card_is_ready(void);
+/* Byte counts from the mounted FAT volume, not nominal card capacity. */
+esp_err_t sd_card_space(uint64_t *total, uint64_t *free_bytes);
 const char *sd_card_get_mount_point(void);
 
 /* The sdmmc_card_t handle behind the currently mounted card, or NULL

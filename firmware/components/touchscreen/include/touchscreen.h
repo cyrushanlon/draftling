@@ -59,11 +59,17 @@ typedef struct {
     int logical_width;
     int logical_height;
 
+    /* Physical bezel crop, after mirror/swap and before scaling.
+     * Zero for a full-panel canvas. These are native panel pixels
+     * in the post-swap frame, not rotated LVGL coordinates. */
+    int crop_left, crop_right, crop_top, crop_bottom;
+
     /* Orientation transforms, applied in this order:
      *   1. mirror_x:  raw_x = native_width  - 1 - raw_x
      *   2. mirror_y:  raw_y = native_height - 1 - raw_y
      *   3. swap_xy:   swap raw_x and raw_y
-     *   4. Scale (native -> logical):
+     *   4. Subtract the bezel crop from position and native size.
+     *   5. Scale (cropped native -> logical):
      *        out_x = raw_x * logical_width  / native_width_after_swap
      *        out_y = raw_y * logical_height / native_height_after_swap
      *

@@ -27,6 +27,11 @@ static sdmmc_card_t *s_card = NULL;
 static char s_mount[32] = "";
 static int  s_spi_host  = -1;     /* set when mounted via SPI, otherwise -1 */
 static bool s_spi_bus_owned = false;
+extern "C" esp_err_t sd_card_space(uint64_t *total, uint64_t *free_bytes)
+{
+    if(!s_card || !total || !free_bytes) return ESP_ERR_INVALID_STATE;
+    return esp_vfs_fat_info(s_mount,total,free_bytes);
+}
 #if defined(CONFIG_DRAFTLING_DISPLAY_EPDIY)
 /* Permanent no-CS "keepalive" device kept on the shared SPI bus for the
  * lifetime of the bus on epdiy boards. See sd_card_init_spi() for the

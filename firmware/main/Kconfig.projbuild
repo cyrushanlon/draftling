@@ -1,5 +1,10 @@
 menu "DRAFTLING Configuration"
 
+config DRAFTLING_RTC_BM8563
+    bool
+    default y if DRAFTLING_MODEL_XTEINK_X4_PRO
+    default n
+
 choice DRAFTLING_HARDWARE_MODEL
     prompt "Hardware Model"
     default DRAFTLING_MODEL_LILYGO_T5_EPD_S3_PRO
@@ -1497,6 +1502,24 @@ config DRAFTLING_STANDBY_WAKE_ON_TOUCH
 
         When this is set the touch INT pin overrides
         DRAFTLING_WAKEUP_GPIO as the deep-sleep wake source.
+
+config DRAFTLING_DISPLAY_BEZEL_MARGIN
+    int
+    range 0 40
+    default 6 if DRAFTLING_MODEL_XTEINK_X4_PRO
+    default 0
+    help
+        Initial safe inset on every edge. Existing smaller user margins
+        are raised once on first boot with this setting, then remain
+        freely adjustable in Settings.
+
+config DRAFTLING_DISPLAY_BEZEL_MARGIN_LEFT
+    int
+    range 0 40
+    default 8 if DRAFTLING_MODEL_XTEINK_X4_PRO
+    default DRAFTLING_DISPLAY_BEZEL_MARGIN
+    help
+        Initial left-edge inset; other edges use DISPLAY_BEZEL_MARGIN.
 
 config DRAFTLING_DISPLAY_WIDTH
     int
